@@ -1,0 +1,89 @@
+# =========================
+# Git 자체 파일
+# =========================
+.git/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+
+# =========================
+# 운영체제 패키지 매니저
+# =========================
+# Node.js / npm
+node_modules/
+npm-debug.log
+yarn-error.log
+yarn-debug.log
+.pnp.*
+.pnp.js
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.ENV/
+build/
+dist/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+.eggs/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+*.log
+target/
+build/
+bin/
+*.iml
+
+# .NET
+bin/
+obj/
+*.suo
+*.user
+*.sln.docstates
+
+# Rust
+target/
+Cargo.lock
+
+# Go
+bin/
+pkg/
+vendor/
+
+# Docker
+docker-compose.yml
+Dockerfile
+*.dockerignore
+*.dockerfile
+
+
+# =========================
+# 기타 일반적인 무시 파일
+# =========================
+*.log
+*.tmp
+*.swp
+*.swo
+*.swn
+*.swo
+*.old
+*.bak
+*.orig
+*.rej
+*.backup
+*.tmp
+*.tmp.*

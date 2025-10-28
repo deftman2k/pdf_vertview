@@ -1,0 +1,143 @@
+[KO]
+==============================
+프로그램 라이선스 정보 (License Information)
+==============================
+
+이 프로그램은 오픈소스 소프트웨어인 PyMuPDF와 PyQt5를 기반으로 제작되었습니다.  
+PyQt5는 GNU General Public License v3 (GPLv3)를 따르며,  
+이 프로그램 역시 GPLv3 조건을 준수합니다.
+
+──────────────────────────────
+1. 사용된 오픈소스 구성요소
+──────────────────────────────
+- PyMuPDF (https://pymupdf.readthedocs.io)
+  License: GNU General Public License v3 (GPLv3)
+  Copyright (C) 2016-2025 Artifex Software, Inc.
+
+- PyQt5 (https://riverbankcomputing.com/software/pyqt/)
+  License: GNU General Public License v3 (GPLv3)
+  Copyright (C) Riverbank Computing Limited
+
+──────────────────────────────
+2. 프로그램 라이선스
+──────────────────────────────
+이 프로그램은 PyQt5의 GPLv3 라이선스 조건에 따라  
+GNU General Public License v3 (GPLv3) 하에 배포됩니다.
+
+즉, 이 프로그램을 배포하거나 수정할 경우 다음 조건을 따라야 합니다.
+
+- 소스 코드를 함께 제공해야 합니다.  
+- 프로그램을 수정 또는 재배포할 경우, 동일하게 GPLv3으로 배포해야 합니다.  
+- 저작권 및 라이선스 고지를 삭제하거나 변경해서는 안 됩니다.
+
+──────────────────────────────
+3. GPLv3 원문
+──────────────────────────────
+GNU GENERAL PUBLIC LICENSE  
+Version 3, 29 June 2007  
+Copyright (C) 2007 Free Software Foundation, Inc.  
+<https://www.gnu.org/licenses/gpl-3.0.html>
+
+You may copy and distribute verbatim copies of this license document,  
+but changing it is not allowed.
+
+──────────────────────────────
+Preamble (요약)
+──────────────────────────────
+The GNU General Public License is a free, copyleft license for software and other kinds of works.
+
+The licenses for most software and other practical works are designed to take away your freedom to share and change the works.  
+By contrast, the GNU General Public License is intended to guarantee your freedom to share and change all versions of a program — to make sure it remains free software for all its users.
+
+──────────────────────────────
+Full License Text
+──────────────────────────────
+The full text of the GNU General Public License version 3 can be found at:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+──────────────────────────────
+4. 면책조항 (Disclaimer)
+──────────────────────────────
+이 프로그램은 "있는 그대로(as is)" 제공되며,  
+명시적 또는 묵시적인 보증이 제공되지 않습니다.  
+프로그램 사용으로 인한 어떠한 손해에 대해서도  
+개발자는 책임을 지지 않습니다.
+
+──────────────────────────────
+Copyright (C) 2025 Chris Park
+All rights reserved.
+──────────────────────────────
+
+
+[EN]
+==============================
+Software License Information
+==============================
+
+This program is based on open-source software components PyMuPDF and PyQt5.  
+PyQt5 is licensed under the GNU General Public License v3 (GPLv3),  
+and this program is therefore distributed under the terms of the GPLv3 as well.
+
+──────────────────────────────
+1. Open Source Components Used
+──────────────────────────────
+- PyMuPDF (https://pymupdf.readthedocs.io)
+  License: GNU General Public License v3 (GPLv3)
+  Copyright (C) 2016-2025 Artifex Software, Inc.
+
+- PyQt5 (https://riverbankcomputing.com/software/pyqt/)
+  License: GNU General Public License v3 (GPLv3)
+  Copyright (C) Riverbank Computing Limited
+
+──────────────────────────────
+2. Program License
+──────────────────────────────
+This program is distributed under the GNU General Public License v3 (GPLv3),  
+in compliance with the PyQt5 license terms.
+
+You are free to use, modify, and redistribute this program under the following conditions:
+
+- You must provide the complete source code when distributing this program.  
+- Any modifications or redistributions must also be licensed under GPLv3.  
+- You must not remove or alter copyright or license notices.
+
+──────────────────────────────
+3. GNU GPLv3 Reference
+──────────────────────────────
+GNU GENERAL PUBLIC LICENSE  
+Version 3, 29 June 2007  
+Copyright (C) 2007 Free Software Foundation, Inc.  
+<https://www.gnu.org/licenses/gpl-3.0.html>
+
+You may copy and distribute verbatim copies of this license document,  
+but changing it is not allowed.
+
+──────────────────────────────
+Preamble (Summary)
+──────────────────────────────
+The GNU General Public License is a free, copyleft license for software and other kinds of works.
+
+The purpose of this license is to guarantee your freedom to share and change all versions of a program —  
+to make sure it remains free software for all its users.
+
+──────────────────────────────
+Full License Text
+──────────────────────────────
+The complete text of the GNU General Public License version 3 is available at:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+──────────────────────────────
+4. Disclaimer
+──────────────────────────────
+This program is provided “as is”, without any warranty of any kind,  
+either express or implied, including but not limited to the warranties of  
+merchantability, fitness for a particular purpose, or non-infringement.
+
+In no event shall the developer be held liable for any damages arising from  
+the use of this software.
+
+──────────────────────────────
+Copyright (C) 2025 Chris Park
+All rights reserved.
+──────────────────────────────
+
