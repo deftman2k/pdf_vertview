@@ -114,9 +114,11 @@ class PdfDocument:
     @classmethod
     def open(cls, file_path: Path) -> "PdfDocument":
         doc = fitz.open(file_path)  # Raises if the file cannot be opened.
-        meta_title = (doc.metadata or {}).get("title") or ""
-        display = meta_title.strip() or file_path.name
-        thumb = cls._build_thumbnail_icon(doc, display)
+        metadata = doc.metadata or {}
+        title_text = (metadata.get("title") or "").strip()
+        display = file_path.name
+        icon_label = title_text or file_path.stem or display
+        thumb = cls._build_thumbnail_icon(doc, icon_label)
         return cls(path=file_path, document=doc, display_name=display, thumbnail=thumb)
 
     @staticmethod
@@ -150,8 +152,14 @@ class PdfDocument:
 
     def save_as(self, destination: Path) -> None:
         """Save the current document to a new path."""
-        dest = destination.resolve()
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest = Path(destination).expanduser()
+        if not dest.is_absolute():
+            dest = dest.absolute()
+
+        parent = dest.parent
+        if parent and not str(dest).startswith("\\\\"):
+            parent.mkdir(parents=True, exist_ok=True)
+
         self.document.save(str(dest))
 
 
@@ -534,7 +542,8 @@ class TabListWidget(QtWidgets.QListWidget):
     def __init__(self, min_width: int, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self._base_min_width = max(1, min_width)
-        self.setUniformItemSizes(True)
+        self.setUniformItemSizes(False)
+        self.setWordWrap(True)
 
     def set_base_min_width(self, width: int) -> None:
         self._base_min_width = max(1, width)
@@ -549,6 +558,16 @@ class TabListWidget(QtWidgets.QListWidget):
         hint = super().sizeHint()
         hint.setWidth(max(self._base_min_width, hint.width()))
         return hint
+
+
+class StatusLabel(QtWidgets.QLabel):
+    """QLabel that notifies listeners when resized so text can be re-elided."""
+
+    resized = QtCore.pyqtSignal()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self.resized.emit()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -588,16 +607,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_list.setMaximumWidth(QtWidgets.QWIDGETSIZE_MAX)
         self.tab_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.tab_list.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
-        self.tab_list.setTextElideMode(QtCore.Qt.ElideRight)
+        self.tab_list.setTextElideMode(QtCore.Qt.ElideNone)
+        self.tab_list.setWordWrap(True)
         self.tab_list.setLayoutDirection(LayoutLeftToRight)
 
-        self.status_label = QtWidgets.QLabel("")
+        self.status_label = StatusLabel("")
         self.status_label.setAlignment(AlignLeft | AlignVCenter)
         self.status_label.setWordWrap(False)
         self.status_label.setMargin(6)
         self.status_label.setStyleSheet("color: #666; border-top: 1px solid #d0d0d0;")
         self.status_label.setMinimumWidth(0)
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.status_label.resized.connect(self._update_status_label)
 
         self.tab_panel = QtWidgets.QWidget()
         panel_layout = QtWidgets.QVBoxLayout(self.tab_panel)
@@ -766,9 +787,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     return None
 
             metadata = doc.metadata or {}
-            title = (metadata.get("title") or "").strip()
-            display = title or path.name
-            thumbnail = PdfDocument._build_thumbnail_icon(doc, display)
+            title_text = (metadata.get("title") or "").strip()
+            display = path.name
+            icon_label = title_text or path.stem or display
+            thumbnail = PdfDocument._build_thumbnail_icon(doc, icon_label)
             return PdfDocument(path=path, document=doc, display_name=display, thumbnail=thumbnail)
         except Exception as exc:
             doc.close()
@@ -957,21 +979,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_status_label(self) -> None:
         count = len(self._documents)
+        base_text = f"열린 문서: {count}개"
+        current_path = ""
         current_name = ""
         current_item = self.tab_list.currentItem()
         if current_item:
             document = current_item.data(UserRole)
             if isinstance(document, PdfDocument):
                 current_name = document.display_name
+                current_path = str(document.path)
 
-        display_text = f"열린 문서: {count}개"
-        self.status_label.setText(display_text)
-
-        if current_name:
-            tooltip = f"{display_text} | 현재: {current_name}"
-            self.status_label.setToolTip(tooltip)
+        if current_path:
+            metrics = self.status_label.fontMetrics()
+            prefix = f"{base_text} | 현재: {current_name} | 위치: "
+            available = max(self.status_label.width() - metrics.horizontalAdvance(prefix), 0)
+            elided_path = metrics.elidedText(current_path, QtCore.Qt.ElideMiddle, available) if available else current_path
+            display_text = f"{prefix}{elided_path}"
+            tooltip = current_path
         else:
-            self.status_label.setToolTip(display_text if self._compact_mode else "")
+            display_text = base_text
+            tooltip = base_text if self._compact_mode else ""
+
+        self.status_label.setText(display_text)
+        self.status_label.setToolTip(tooltip)
     def _add_watch(self, path: Path) -> None:
         normalized = normalize_path(path)
         if normalized not in self._watched_files:
