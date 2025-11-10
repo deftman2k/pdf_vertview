@@ -15,14 +15,16 @@ Required packages:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Set, cast
+from typing import Dict, Iterable, Optional, Set, Tuple, cast
 
 try:
-    from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
+    from PyQt5 import QtCore, QtGui, QtWidgets, QtPrintSupport, QtNetwork  # type: ignore
 except ImportError as exc:  # pragma: no cover - import guard.
     raise SystemExit("PyQt5 is required. Install with 'pip install PyQt5'.") from exc
 
@@ -59,10 +61,186 @@ def exec_qapplication(app: QtWidgets.QApplication) -> int:
 
 def normalize_path(path: Path) -> Path:
     """Return an absolute path even if the file does not currently exist."""
+    candidate = Path(path).expanduser()
+
+    # UNC paths often trigger authentication when resolved; leave them as-is.
+    candidate_text = str(candidate)
+    if candidate_text.startswith(("\\\\", "//")):
+        decoded_text = _decode_unc_hostname(candidate_text)
+        if decoded_text != candidate_text:
+            return Path(decoded_text)
+        return candidate
+
     try:
-        return path.resolve(strict=True)
+        return candidate.resolve(strict=True)
     except FileNotFoundError:
-        return path.resolve(strict=False)
+        pass
+    except OSError:
+        pass
+
+    try:
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError):
+        pass
+
+    if candidate.is_absolute():
+        return candidate
+
+    try:
+        return Path.cwd() / candidate
+    except OSError:
+        return candidate
+
+
+def _decode_unc_hostname(text: str) -> str:
+    """Decode IDNA (punycode) hostnames in UNC paths for readability."""
+    if not text.startswith(("\\\\", "//")):
+        return text
+
+    prefix = text[:2]
+    remainder = text[2:]
+    separator = "\\" if prefix == "\\\\" else "/"
+    if not remainder:
+        return text
+
+    parts = remainder.split(separator, 1)
+    host = parts[0]
+    if not host or not host.startswith(("xn--", "XN--")):
+        return text
+
+    try:
+        decoded = host.encode("ascii").decode("idna")
+    except (UnicodeEncodeError, UnicodeError):
+        return text
+
+    if decoded == host:
+        return text
+
+    tail = parts[1] if len(parts) > 1 else ""
+    if tail:
+        return f"{prefix}{decoded}{separator}{tail}"
+    return f"{prefix}{decoded}"
+
+
+def _prepare_filesystem_path(path: Path) -> str:
+    """Return a string path safe for Windows long/UNC paths."""
+    text = os.fspath(path)
+    if os.name != "nt":
+        return text
+
+    if text.startswith("\\\\?\\") or text.startswith("//?/"):
+        return text
+
+    is_unc = text.startswith("\\\\") or text.startswith("//")
+    needs_long_path = len(text) >= 260
+    if is_unc:
+        remainder = text.lstrip("\\/")  # strip leading slashes for UNC body
+        if not remainder:
+            return text
+        return f"\\\\?\\UNC\\{remainder}"
+    if needs_long_path:
+        return f"\\\\?\\{text}"
+    return text
+
+
+def _display_path_text(path: Path | str) -> str:
+    """Return a user-facing path string with decoded UNC hostnames."""
+    text = os.fspath(path)
+    if os.name != "nt":
+        return text
+
+    if text.startswith("\\\\?\\UNC\\"):
+        text = f"\\\\{text[8:]}"
+    elif text.startswith("\\\\?\\"):
+        text = text[4:]
+
+    return _decode_unc_hostname(text)
+
+
+
+def read_bool_setting(store: QtCore.QSettings, key: str, default: bool) -> bool:
+    value = store.value(key, default)
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def resolve_resource_path(name: str) -> Path:
+    """Return an absolute path to a bundled auxiliary resource."""
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            return Path(base) / name
+        return Path(sys.executable).resolve().parent / name
+    return Path(__file__).resolve().parent / name
+
+
+user_token = (os.environ.get('USERNAME') or os.environ.get('USER') or 'default')
+user_token = user_token.replace('\\', '_').replace('/', '_').replace(' ', '_')
+SINGLE_INSTANCE_SERVER = f'PdfVertViewSingleton_{user_token}'
+
+
+class SingleInstanceHost(QtCore.QObject):
+    """Accept open requests from secondary processes."""
+
+    open_requested = QtCore.pyqtSignal(list)
+
+    def __init__(self, parent: Optional[QtCore.QObject] = None) -> None:
+        super().__init__(parent)
+        self._server = QtNetwork.QLocalServer(self)
+        QtNetwork.QLocalServer.removeServer(SINGLE_INSTANCE_SERVER)
+        if not self._server.listen(SINGLE_INSTANCE_SERVER):
+            self._server = None
+            return
+        self._server.newConnection.connect(self._process_new_connection)
+
+    def _process_new_connection(self) -> None:
+        if not self._server:
+            return
+        while self._server.hasPendingConnections():
+            connection = self._server.nextPendingConnection()
+            if connection is None:
+                continue
+            connection.readyRead.connect(lambda conn=connection: self._read_socket(conn))
+            connection.disconnected.connect(connection.deleteLater)
+
+    def _read_socket(self, socket: QtNetwork.QLocalSocket) -> None:
+        data = bytes(socket.readAll())
+        if not data:
+            return
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except Exception:
+            payload = []
+        paths: list[str] = []
+        if isinstance(payload, list):
+            paths = [str(item) for item in payload if isinstance(item, str)]
+        if paths:
+            self.open_requested.emit(paths)
+        socket.disconnectFromServer()
+        socket.close()
+
+
+def forward_paths_to_primary(paths: Iterable[Path]) -> bool:
+    serialized = [str(Path(p)) for p in paths]
+    if not serialized:
+        return False
+    socket = QtNetwork.QLocalSocket()
+    socket.connectToServer(SINGLE_INSTANCE_SERVER, QtCore.QIODevice.WriteOnly)
+    if not socket.waitForConnected(500):
+        return False
+    try:
+        payload = json.dumps(serialized).encode("utf-8")
+        if socket.write(payload) == -1:
+            return False
+        socket.flush()
+        socket.waitForBytesWritten(500)
+        socket.disconnectFromServer()
+        socket.waitForDisconnected(500)
+        socket.close()
+    except Exception:
+        return False
+    return True
 
 
 def qimage_from_pixmap(pix: fitz.Pixmap) -> QtGui.QImage:
@@ -113,7 +291,7 @@ class PdfDocument:
 
     @classmethod
     def open(cls, file_path: Path) -> "PdfDocument":
-        doc = fitz.open(file_path)  # Raises if the file cannot be opened.
+        doc = fitz.open(_prepare_filesystem_path(file_path))  # Raises if the file cannot be opened.
         metadata = doc.metadata or {}
         title_text = (metadata.get("title") or "").strip()
         display = file_path.name
@@ -154,13 +332,48 @@ class PdfDocument:
         """Save the current document to a new path."""
         dest = Path(destination).expanduser()
         if not dest.is_absolute():
-            dest = dest.absolute()
+            dest = Path.cwd() / dest
+
+        dest = normalize_path(dest)
 
         parent = dest.parent
         if parent and not str(dest).startswith("\\\\"):
             parent.mkdir(parents=True, exist_ok=True)
 
-        self.document.save(str(dest))
+        self.document.save(_prepare_filesystem_path(dest))
+
+    def rotate_document(self, degrees: int) -> None:
+        """Rotate every page in the document by the supplied degrees."""
+        step = degrees % 360
+        if step == 0:
+            return
+        if step % 90 != 0:
+            raise ValueError("Rotation must be a multiple of 90 degrees.")
+
+        for index in range(self.page_count):
+            page = self.document.load_page(index)
+            self._set_page_rotation(page, (page.rotation + step) % 360)
+
+    def rotate_page(self, index: int, degrees: int) -> None:
+        """Rotate a single page by the supplied degrees."""
+        if index < 0 or index >= self.page_count:
+            raise IndexError("Page index out of range.")
+        step = degrees % 360
+        if step == 0:
+            return
+        if step % 90 != 0:
+            raise ValueError("Rotation must be a multiple of 90 degrees.")
+
+        page = self.document.load_page(index)
+        self._set_page_rotation(page, (page.rotation + step) % 360)
+
+    @staticmethod
+    def _set_page_rotation(page: fitz.Page, rotation: int) -> None:
+        rotation = rotation % 360
+        try:
+            page.set_rotation(rotation)
+        except AttributeError:  # pragma: no cover - compatibility with older PyMuPDF.
+            page.setRotation(rotation)
 
 
 @dataclass(frozen=True)
@@ -220,6 +433,7 @@ class PdfViewerWidget(QtWidgets.QWidget):
         self._document: Optional[PdfDocument] = None
         self._page_index: int = 0
         self._zoom: float = 1.0
+        self._default_fit_mode: str = "page"
         self._fit_mode: Optional[str] = None  # "width", "page", or None
         self._pending_fit_update: bool = False
         self._panning_active: bool = False
@@ -240,11 +454,14 @@ class PdfViewerWidget(QtWidgets.QWidget):
         self._scroll_area.setAlignment(AlignCenter)
         self._scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._scroll_area.setWidget(self._image_label)
+        self._scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._scroll_area.viewport().setAutoFillBackground(True)
+        self._scroll_area.viewport().setStyleSheet("background-color: #f3f3f3;")
         self._scroll_area.viewport().installEventFilter(self)
-        self._scroll_area.verticalScrollBar().setStyleSheet(
-            """
+
+        scrollbar_style = """
             QScrollBar:vertical {
-                width: 10px;
+                width: 12px;
                 margin: 0;
                 background: transparent;
             }
@@ -261,8 +478,17 @@ class PdfViewerWidget(QtWidgets.QWidget):
             QScrollBar::sub-page:vertical {
                 background: none;
             }
-            """
-        )
+        """
+
+        self._page_scrollbar = QtWidgets.QScrollBar(QtCore.Qt.Vertical)
+        self._page_scrollbar.setRange(0, 0)
+        self._page_scrollbar.setPageStep(1)
+        self._page_scrollbar.setSingleStep(1)
+        self._page_scrollbar.setVisible(False)
+        self._page_scrollbar.setEnabled(False)
+        self._page_scrollbar.setStyleSheet(scrollbar_style)
+        self._page_scrollbar.setFixedWidth(14)
+        self._page_scrollbar.valueChanged.connect(self._on_page_scrollbar_changed)
 
         self._page_indicator = QtWidgets.QLabel("")
         self._page_indicator.setAlignment(AlignCenter)
@@ -273,7 +499,14 @@ class PdfViewerWidget(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._scroll_area, 1)
+
+        viewer_row = QtWidgets.QHBoxLayout()
+        viewer_row.setContentsMargins(0, 0, 0, 0)
+        viewer_row.setSpacing(0)
+        viewer_row.addWidget(self._scroll_area, 1)
+        viewer_row.addWidget(self._page_scrollbar, 0)
+
+        layout.addLayout(viewer_row, 1)
         layout.addWidget(self._page_indicator, 0)
 
         self.prev_action = QAction("◀ 이전 PAGE", self)
@@ -338,7 +571,8 @@ class PdfViewerWidget(QtWidgets.QWidget):
         self._pending_fit_update = False
         self._panning_active = False
         self._scroll_area.viewport().unsetCursor()
-        self._apply_fit_or_render()
+        self._apply_default_fit_mode()
+        self._sync_page_scrollbar()
 
     def clear(self) -> None:
         self._document = None
@@ -351,6 +585,7 @@ class PdfViewerWidget(QtWidgets.QWidget):
         self._page_indicator_text = ""
         self._pending_fit_update = False
         self._update_action_states()
+        self._sync_page_scrollbar()
 
     # -- navigation ----------------------------------------------------------
 
@@ -363,6 +598,15 @@ class PdfViewerWidget(QtWidgets.QWidget):
         if self._document and self._page_index < self._document.page_count - 1:
             self._page_index += 1
             self._apply_fit_or_render()
+
+    def go_to_page(self, index: int) -> None:
+        if not self._document:
+            return
+        clamped = max(0, min(index, self._document.page_count - 1))
+        if clamped == self._page_index:
+            return
+        self._page_index = clamped
+        self._apply_fit_or_render()
 
     # -- zoom controls -------------------------------------------------------
 
@@ -384,6 +628,22 @@ class PdfViewerWidget(QtWidgets.QWidget):
         if not self._document:
             return
         self._fit_mode = "page"
+        self._apply_fit()
+
+    def set_default_fit_mode(self, mode: str) -> None:
+        normalized = "width" if mode == "width" else "page"
+        if self._default_fit_mode == normalized and self._fit_mode == normalized:
+            return
+        self._default_fit_mode = normalized
+        if self._document:
+            self._fit_mode = normalized
+            self._apply_fit()
+
+    def _apply_default_fit_mode(self) -> None:
+        if not self._document:
+            self._fit_mode = None
+            return
+        self._fit_mode = self._default_fit_mode
         self._apply_fit()
 
     # -- helpers -------------------------------------------------------------
@@ -428,6 +688,7 @@ class PdfViewerWidget(QtWidgets.QWidget):
         )
         self._update_page_indicator_label()
         self._update_action_states()
+        self._sync_page_scrollbar()
 
     def _update_action_states(self) -> None:
         has_doc = self._document is not None
@@ -522,6 +783,38 @@ class PdfViewerWidget(QtWidgets.QWidget):
 
         self._set_zoom(new_zoom, from_fit=True)
 
+    def _on_page_scrollbar_changed(self, value: int) -> None:
+        if not self._document:
+            return
+        if value == self._page_index:
+            return
+        self.go_to_page(value)
+
+    def _sync_page_scrollbar(self) -> None:
+        bar = self._page_scrollbar
+        if not self._document:
+            bar.blockSignals(True)
+            bar.setRange(0, 0)
+            bar.setValue(0)
+            bar.setEnabled(False)
+            bar.setVisible(False)
+            bar.setToolTip("")
+            bar.blockSignals(False)
+            return
+
+        page_count = max(self._document.page_count, 0)
+        bar.blockSignals(True)
+        bar.setRange(0, max(page_count - 1, 0))
+        bar.setPageStep(1)
+        bar.setSingleStep(1)
+        bar.setEnabled(page_count > 1)
+        bar.setVisible(page_count > 0)
+        bar.setValue(min(self._page_index, max(page_count - 1, 0)))
+        current_display = self._page_index + 1 if page_count > 0 else 0
+        total_display = page_count if page_count > 0 else 0
+        bar.setToolTip(f"페이지 탐색: {current_display} / {total_display}")
+        bar.blockSignals(False)
+
     def _update_page_indicator_label(self) -> None:
         if not self._page_indicator_text:
             self._page_indicator.setText("")
@@ -531,6 +824,16 @@ class PdfViewerWidget(QtWidgets.QWidget):
         available = max(self._page_indicator.width() - 16, 80)
         elided = metrics.elidedText(self._page_indicator_text, QtCore.Qt.ElideMiddle, available)
         self._page_indicator.setText(elided)
+
+    def current_document(self) -> Optional[PdfDocument]:
+        return self._document
+
+    def current_page_index(self) -> int:
+        return self._page_index
+
+    def refresh_current_page(self) -> None:
+        if self._document:
+            self._render_current_page()
 
 
 # ---- Main window --------------------------------------------------------------
@@ -570,14 +873,98 @@ class StatusLabel(QtWidgets.QLabel):
         self.resized.emit()
 
 
+class SettingsDialog(QtWidgets.QDialog):
+    """Dialog window for configuring viewer preferences."""
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("설정")
+        self.setModal(True)
+        self.setMinimumWidth(320)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        self.compact_checkbox = QtWidgets.QCheckBox("세로 탭 컴팩트 모드", self)
+        layout.addWidget(self.compact_checkbox)
+
+        self.show_tabs_checkbox = QtWidgets.QCheckBox("세로 탭 표시", self)
+        layout.addWidget(self.show_tabs_checkbox)
+
+        self.open_same_window_checkbox = QtWidgets.QCheckBox("추가 파일을 동일 창에서 열기", self)
+        layout.addWidget(self.open_same_window_checkbox)
+
+        self.delete_original_checkbox = QtWidgets.QCheckBox("다른 이름으로 저장 시 기존 파일 삭제", self)
+        layout.addWidget(self.delete_original_checkbox)
+
+        fit_layout = QtWidgets.QHBoxLayout()
+        fit_label = QtWidgets.QLabel("새 문서 기본 보기:", self)
+        fit_layout.addWidget(fit_label)
+
+        self.default_fit_combo = QtWidgets.QComboBox(self)
+        self.default_fit_combo.addItem("페이지 맞춤", "page")
+        self.default_fit_combo.addItem("너비 맞춤", "width")
+        fit_layout.addWidget(self.default_fit_combo, 1)
+        layout.addLayout(fit_layout)
+
+        layout.addStretch(1)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            parent=self,
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def set_compact_mode(self, enabled: bool) -> None:
+        self.compact_checkbox.setChecked(enabled)
+
+    def set_tab_panel_visible(self, visible: bool) -> None:
+        self.show_tabs_checkbox.setChecked(visible)
+
+    def set_open_same_window(self, enabled: bool) -> None:
+        self.open_same_window_checkbox.setChecked(enabled)
+
+    def set_delete_original_on_save_as(self, enabled: bool) -> None:
+        self.delete_original_checkbox.setChecked(enabled)
+
+    def set_default_fit_mode(self, mode: str) -> None:
+        index = self.default_fit_combo.findData(mode)
+        if index < 0:
+            index = 0
+        self.default_fit_combo.setCurrentIndex(index)
+
+    def compact_mode_enabled(self) -> bool:
+        return self.compact_checkbox.isChecked()
+
+    def tab_panel_visible(self) -> bool:
+        return self.show_tabs_checkbox.isChecked()
+
+    def open_same_window(self) -> bool:
+        return self.open_same_window_checkbox.isChecked()
+
+    def delete_original_on_save_as(self) -> bool:
+        return self.delete_original_checkbox.isChecked()
+
+    def default_fit_mode(self) -> str:
+        data = self.default_fit_combo.currentData()
+        return data if isinstance(data, str) else "page"
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """Primary application window with a vertical tab rail."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._app_title = "PDF Vertical Tabs Viewer v1.0"
+        self._app_title = "PDF Vertical Tabs Viewer v1.0.5"
         self.setWindowTitle(self._app_title)
-        self.resize(980, 760)
+        self._settings = QtCore.QSettings("PdfVertView", "PdfVerticalTabsViewer")
+        geometry = self._settings.value("window/geometry", QtCore.QByteArray(), type=QtCore.QByteArray)
+        if isinstance(geometry, QtCore.QByteArray) and not geometry.isEmpty():
+            self.restoreGeometry(geometry)
+        else:
+            self.resize(980, 760)
         self.setAcceptDrops(True)
 
         self._documents: Dict[Path, PdfDocument] = {}
@@ -588,6 +975,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._watcher = QtCore.QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._handle_watched_file_changed)
         self._watcher.directoryChanged.connect(self._handle_watched_directory_changed)
+        self._secondary_windows: list[MainWindow] = []
+        self._open_additional_in_same_window = True
+        self._delete_original_on_save_as = False
+        self._default_fit_mode = "page"
         self._compact_mode = False
         self._expanded_width = 220
         self._min_tab_width = 72
@@ -630,6 +1021,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_panel.setMaximumWidth(QtWidgets.QWIDGETSIZE_MAX)
 
         self.viewer = PdfViewerWidget()
+        self.viewer.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.viewer.customContextMenuRequested.connect(self._show_viewer_context_menu)
 
         self._splitter = QtWidgets.QSplitter()
         self._splitter.addWidget(self.viewer)
@@ -654,6 +1047,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self._splitter)
 
         self._build_menus()
+        self._load_preferences()
+        self._single_instance_host = SingleInstanceHost(self)
+        self._single_instance_host.open_requested.connect(self._handle_external_open_request)
         self._update_status_label()
 
     # -- menu setup -----------------------------------------------------------
@@ -668,23 +1064,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_action.triggered.connect(self._open_documents_dialog)
         base_menu.addAction(self.open_action)
 
+        self.print_preview_action = QAction("인쇄 미리보기...", self)
+        preview_key = getattr(QtGui.QKeySequence.StandardKey, "PrintPreview", None)
+        if preview_key is not None:
+            self.print_preview_action.setShortcut(QtGui.QKeySequence(preview_key))
+        else:
+            self.print_preview_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+P"))
+        self.print_preview_action.triggered.connect(self._show_print_preview)
+        self.print_preview_action.setEnabled(False)
+        base_menu.addAction(self.print_preview_action)
+
         self.close_action = QAction("현재 문서 닫기", self)
         self.close_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Close))
         self.close_action.triggered.connect(self.close_current_document)
         self.close_action.setEnabled(False)
         base_menu.addAction(self.close_action)
 
-        base_menu.addSeparator()
         self.compact_action = QAction("세로 탭 컴팩트 모드", self)
         self.compact_action.setCheckable(True)
         self.compact_action.triggered.connect(self.toggle_compact_tabs)
-        base_menu.addAction(self.compact_action)
 
         self.toggle_tabs_action = QAction("세로 탭 표시", self)
         self.toggle_tabs_action.setCheckable(True)
         self.toggle_tabs_action.setChecked(True)
         self.toggle_tabs_action.triggered.connect(self.set_tab_panel_visible)
-        base_menu.addAction(self.toggle_tabs_action)
+
+        base_menu.addSeparator()
+        self.settings_action = QAction("설정...", self)
+        self.settings_action.triggered.connect(self._show_settings_dialog)
+        base_menu.addAction(self.settings_action)
 
         base_menu.addSeparator()
         base_menu.addAction(self.viewer.prev_action)
@@ -696,11 +1104,49 @@ class MainWindow(QtWidgets.QMainWindow):
         base_menu.addAction(self.viewer.fit_page_action)
 
         modify_menu = menubar.addMenu("변경기능")
-        placeholder = QAction("추가 기능 준비 중", self)
-        placeholder.setEnabled(False)
-        modify_menu.addAction(placeholder)
+
+        self.rotate_document_cw_action = QAction("문서 회전 (시계방향 90°)", self)
+        self.rotate_document_cw_action.triggered.connect(self._rotate_document_cw)
+        modify_menu.addAction(self.rotate_document_cw_action)
+
+        self.rotate_document_ccw_action = QAction("문서 회전 (반시계방향 90°)", self)
+        self.rotate_document_ccw_action.triggered.connect(self._rotate_document_ccw)
+        modify_menu.addAction(self.rotate_document_ccw_action)
+
+        modify_menu.addSeparator()
+
+        self.save_changes_action = QAction("저장하기", self)
+        self.save_changes_action.triggered.connect(self._save_changes)
+        modify_menu.addAction(self.save_changes_action)
+
+        self.save_changes_as_action = QAction("다른 이름으로 저장하기", self)
+        self.save_changes_as_action.triggered.connect(self._save_changes_as)
+        modify_menu.addAction(self.save_changes_as_action)
+
+        modify_menu.addSeparator()
+
+        self.rotate_page_cw_action = QAction("페이지 회전 (시계방향 90°)", self)
+        self.rotate_page_cw_action.triggered.connect(self._rotate_page_cw)
+        modify_menu.addAction(self.rotate_page_cw_action)
+
+        self.rotate_page_ccw_action = QAction("페이지 회전 (반시계방향 90°)", self)
+        self.rotate_page_ccw_action.triggered.connect(self._rotate_page_ccw)
+        modify_menu.addAction(self.rotate_page_ccw_action)
+
+        modify_menu.addSeparator()
+
+        self.export_page_image_action = QAction("그림 저장...", self)
+        self.export_page_image_action.triggered.connect(self._export_page_image)
+        modify_menu.addAction(self.export_page_image_action)
+
+        self._update_modify_actions_state(None)
 
         info_menu = menubar.addMenu("정보")
+
+        release_action = QAction("릴리스 정보", self)
+        release_action.triggered.connect(self._show_release_info)
+        info_menu.addAction(release_action)
+        self.release_info_action = release_action
 
         license_action = QAction("라이선스 정보", self)
         license_action.triggered.connect(self._show_license_info)
@@ -709,6 +1155,45 @@ class MainWindow(QtWidgets.QMainWindow):
         author_action = QAction("제작자", self)
         author_action.triggered.connect(self._show_author_info)
         info_menu.addAction(author_action)
+
+    def _load_preferences(self) -> None:
+        compact_mode = read_bool_setting(self._settings, "ui/compact_tabs", False)
+        self.set_compact_tabs_enabled(compact_mode)
+
+        tab_visible = read_bool_setting(self._settings, "ui/tab_panel_visible", True)
+        if tab_visible != self._tab_panel_visible:
+            self.set_tab_panel_visible(tab_visible)
+        else:
+            if self.toggle_tabs_action.isChecked() != tab_visible:
+                self.toggle_tabs_action.blockSignals(True)
+                self.toggle_tabs_action.setChecked(tab_visible)
+                self.toggle_tabs_action.blockSignals(False)
+
+        self._open_additional_in_same_window = read_bool_setting(
+            self._settings, "behavior/open_in_same_window", True
+        )
+        self._delete_original_on_save_as = read_bool_setting(
+            self._settings, "behavior/delete_original_on_save_as", False
+        )
+        mode_pref = self._read_string_setting("ui/default_fit_mode", "page")
+        self._apply_default_fit_mode(mode_pref, persist=False)
+
+    def _show_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self)
+        dialog.set_compact_mode(self._compact_mode)
+        dialog.set_tab_panel_visible(self._tab_panel_visible)
+        dialog.set_open_same_window(self._open_additional_in_same_window)
+        dialog.set_delete_original_on_save_as(self._delete_original_on_save_as)
+        dialog.set_default_fit_mode(self._default_fit_mode)
+
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+
+        self.set_compact_tabs_enabled(dialog.compact_mode_enabled())
+        self.set_tab_panel_visible(dialog.tab_panel_visible())
+        self.set_open_in_same_window(dialog.open_same_window())
+        self.set_delete_original_on_save_as(dialog.delete_original_on_save_as())
+        self.set_default_fit_mode(dialog.default_fit_mode())
 
     # -- document management -------------------------------------------------
 
@@ -719,8 +1204,20 @@ class MainWindow(QtWidgets.QMainWindow):
             str(Path.home()),
             "PDF documents (*.pdf);;All files (*)",
         )
-        for path_str in paths:
-            self.open_document_from_path(Path(path_str))
+        selected_paths = [Path(path_str) for path_str in paths]
+        self._handle_new_paths(selected_paths)
+
+    def _handle_new_paths(self, paths: Iterable[Path]) -> None:
+        materialized = [Path(path).expanduser() for path in paths]
+        if not materialized:
+            return
+
+        if not self._documents or self._open_additional_in_same_window:
+            for path in materialized:
+                self.open_document_from_path(path)
+            return
+
+        self._open_paths_in_new_window(materialized)
 
     def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
         if self._extract_pdf_paths(event.mimeData()):
@@ -734,9 +1231,51 @@ class MainWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
 
-        for path in paths:
-            self.open_document_from_path(path)
+        self._handle_new_paths(paths)
         event.acceptProposedAction()
+
+    def _open_paths_in_new_window(self, paths: list[Path]) -> None:
+        new_window = MainWindow()
+        self._track_secondary_window(new_window)
+        new_window.show()
+        for path in paths:
+            new_window.open_document_from_path(path)
+        new_window.raise_()
+        new_window.activateWindow()
+
+    def _handle_external_open_request(self, path_strings: list[str]) -> None:
+        paths = [Path(p).expanduser() for p in path_strings]
+        if not paths:
+            self._focus_window()
+            return
+        if self._open_additional_in_same_window:
+            self._handle_new_paths(paths)
+            self._focus_window()
+        else:
+            self._open_paths_in_new_window(paths)
+
+    def _track_secondary_window(self, window: "MainWindow") -> None:
+        self._secondary_windows.append(window)
+
+        window_ref: weakref.ReferenceType[MainWindow] = weakref.ref(window)
+
+        def _cleanup(_: Optional[QtCore.QObject] = None) -> None:
+            self._cleanup_secondary_window(window_ref)
+
+        window.destroyed.connect(_cleanup)
+
+    def _cleanup_secondary_window(self, window_ref: weakref.ReferenceType["MainWindow"]) -> None:
+        window = window_ref()
+        if window in self._secondary_windows:
+            self._secondary_windows.remove(window)
+
+    def _focus_window(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _extract_pdf_paths(self, mime: QtCore.QMimeData) -> list[Path]:
         if not mime.hasUrls():
@@ -752,32 +1291,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _create_pdf_document(self, path: Path) -> Optional[PdfDocument]:
         try:
-            doc = fitz.open(path)
+            doc = fitz.open(_prepare_filesystem_path(path))
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Open failed", f"{path.name}\n\n{exc}")
             return None
 
         try:
-            if getattr(doc, "needs_pass", False):
-                unlocked = False
-                try:
-                    unlocked = bool(doc.authenticate(""))
-                except Exception:
-                    unlocked = False
+            needs_pass = bool(getattr(doc, "needs_pass", False))
+            if needs_pass:
+                unlocked = self._authenticate_document(doc, "")
                 if not unlocked:
                     auth_result = self._prompt_for_pdf_password(doc, path)
                     if auth_result is None:
                         doc.close()
                         return None
-                    if not auth_result or getattr(doc, "needs_pass", False):
-                        doc.close()
-                        QtWidgets.QMessageBox.critical(
-                            self,
-                            "Open failed",
-                            f"{path.name}\n\n암호 확인에 실패했습니다.",
-                        )
-                        return None
-                if getattr(doc, "needs_pass", False):
+                    unlocked = auth_result
+                if not unlocked:
                     doc.close()
                     QtWidgets.QMessageBox.critical(
                         self,
@@ -797,6 +1326,20 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Open failed", f"{path.name}\n\n{exc}")
             return None
 
+    @staticmethod
+    def _authenticate_document(doc: fitz.Document, password: str) -> bool:
+        try:
+            result = doc.authenticate(password)
+        except Exception:
+            result = False
+        if isinstance(result, (bool, int)):
+            if bool(result):
+                return True
+        elif result not in (None, False):
+            return True
+        return not getattr(doc, "needs_pass", False)
+
+
     def _prompt_for_pdf_password(self, doc: fitz.Document, path: Path) -> Optional[bool]:
         prompt = (
             f"{path.name} 문서는 암호로 보호되어 있습니다.\n"
@@ -812,7 +1355,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok:
                 return None
             try:
-                if doc.authenticate(password) and not getattr(doc, "needs_pass", False):
+                if self._authenticate_document(doc, password):
                     return True
             except Exception:
                 pass
@@ -833,6 +1376,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         document = self._create_pdf_document(normalized)
         if document is None:
+            return
+
+        self._add_document_to_ui(
+            document, normalized, insert_row=insert_row, make_current=make_current
+        )
+
+
+    def _add_document_to_ui(
+        self,
+        document: PdfDocument,
+        normalized: Path,
+        insert_row: Optional[int] = None,
+        make_current: bool = True,
+    ) -> None:
+        if normalized in self._documents:
+            if make_current:
+                self._select_tab(normalized)
             return
 
         item = QtWidgets.QListWidgetItem(document.display_name)
@@ -909,8 +1469,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_status_label()
 
     def toggle_compact_tabs(self) -> None:
-        self._compact_mode = self.compact_action.isChecked()
-        if self._compact_mode:
+        self.set_compact_tabs_enabled(self.compact_action.isChecked())
+
+    def set_compact_tabs_enabled(self, enabled: bool) -> None:
+        if self.compact_action.isChecked() != enabled:
+            self.compact_action.blockSignals(True)
+            self.compact_action.setChecked(enabled)
+            self.compact_action.blockSignals(False)
+
+        if self._compact_mode == enabled:
+            return
+
+        self._compact_mode = enabled
+        if enabled:
             width = 72
             self.tab_list.setMinimumWidth(width)
             self.tab_list.setMaximumWidth(width)
@@ -934,11 +1505,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tab_panel.setMaximumWidth(QtWidgets.QWIDGETSIZE_MAX)
             self._apply_tab_width(self._expanded_width)
 
+        self._settings.setValue("ui/compact_tabs", enabled)
         self._refresh_tab_labels()
         self._enforce_tab_limit()
         self._update_status_label()
 
     def set_tab_panel_visible(self, visible: bool) -> None:
+        if self.toggle_tabs_action.isChecked() != visible:
+            self.toggle_tabs_action.blockSignals(True)
+            self.toggle_tabs_action.setChecked(visible)
+            self.toggle_tabs_action.blockSignals(False)
+
         if self._tab_panel_visible == visible:
             return
 
@@ -963,9 +1540,46 @@ class MainWindow(QtWidgets.QMainWindow):
             self._splitter.setSizes([total, 0])
             self._splitter.blockSignals(False)
 
-        self.toggle_tabs_action.blockSignals(True)
-        self.toggle_tabs_action.setChecked(self._tab_panel_visible)
-        self.toggle_tabs_action.blockSignals(False)
+        self._settings.setValue("ui/tab_panel_visible", self._tab_panel_visible)
+
+    def set_open_in_same_window(self, enabled: bool) -> None:
+        if self._open_additional_in_same_window == enabled:
+            return
+        self._open_additional_in_same_window = enabled
+        self._settings.setValue("behavior/open_in_same_window", enabled)
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+
+    def set_delete_original_on_save_as(self, enabled: bool) -> None:
+        if self._delete_original_on_save_as == enabled:
+            return
+        self._delete_original_on_save_as = enabled
+        self._settings.setValue("behavior/delete_original_on_save_as", enabled)
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+
+    def _read_string_setting(self, key: str, default: str) -> str:
+        value = self._settings.value(key, default)
+        if isinstance(value, str):
+            return value
+        return str(value) if value is not None else default
+
+    def set_default_fit_mode(self, mode: str) -> None:
+        self._apply_default_fit_mode(mode, persist=True)
+
+    def _apply_default_fit_mode(self, mode: str, *, persist: bool) -> None:
+        normalized = "width" if mode == "width" else "page"
+        if self._default_fit_mode == normalized and not persist:
+            # Already applied during startup load; nothing to do.
+            return
+        self._default_fit_mode = normalized
+        self.viewer.set_default_fit_mode(normalized)
+        if persist:
+            self._settings.setValue("ui/default_fit_mode", normalized)
 
     def _refresh_tab_labels(self) -> None:
         for index in range(self.tab_list.count()):
@@ -982,10 +1596,12 @@ class MainWindow(QtWidgets.QMainWindow):
         base_text = f"열린 문서: {count}개"
         current_path = ""
         current_name = ""
+        current_document: Optional[PdfDocument] = None
         current_item = self.tab_list.currentItem()
         if current_item:
             document = current_item.data(UserRole)
             if isinstance(document, PdfDocument):
+                current_document = document
                 current_name = document.display_name
                 current_path = str(document.path)
 
@@ -1002,6 +1618,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status_label.setText(display_text)
         self.status_label.setToolTip(tooltip)
+        self._update_modify_actions_state(current_document)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._settings.setValue("window/geometry", self.saveGeometry())
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+        super().closeEvent(event)
     def _add_watch(self, path: Path) -> None:
         normalized = normalize_path(path)
         if normalized not in self._watched_files:
@@ -1177,8 +1802,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         menu = QtWidgets.QMenu(self)
-        open_action = menu.addAction("문서로 이동")
-        save_as_action = menu.addAction("다음 이름으로 저장…")
+        copy_name_action = menu.addAction("파일명 복사")
+        save_as_action = menu.addAction("다른 이름으로 저장…")
         folder_action = menu.addAction("파일 위치 열기")
         menu.addSeparator()
         close_action = menu.addAction("닫기")
@@ -1187,8 +1812,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if selected is None:
             return
 
-        if selected == open_action:
+        if selected == copy_name_action:
             self.tab_list.setCurrentItem(item)
+            QtWidgets.QApplication.clipboard().setText(document.path.name)
         elif selected == save_as_action:
             self.tab_list.setCurrentItem(item)
             self._save_document_as(document)
@@ -1197,6 +1823,25 @@ class MainWindow(QtWidgets.QMainWindow):
         elif selected == close_action:
             self.tab_list.setCurrentItem(item)
             self.close_current_document()
+
+    def _show_viewer_context_menu(self, point: QtCore.QPoint) -> None:
+        menu = QtWidgets.QMenu(self)
+        menu.addAction(self.save_changes_action)
+        menu.addAction(self.save_changes_as_action)
+        menu.addSeparator()
+        menu.addAction(self.print_preview_action)
+        menu.addSeparator()
+        menu.addAction(self.viewer.fit_page_action)
+        menu.addAction(self.viewer.fit_width_action)
+        menu.addSeparator()
+        menu.addAction(self.rotate_document_cw_action)
+        menu.addAction(self.rotate_document_ccw_action)
+        menu.addSeparator()
+        menu.addAction(self.rotate_page_cw_action)
+        menu.addAction(self.rotate_page_ccw_action)
+        menu.addSeparator()
+        menu.addAction(self.export_page_image_action)
+        menu.exec(self.viewer.mapToGlobal(point))
 
     def _enforce_tab_limit(self, *_args) -> None:
         """Keep the tab rail from occupying more than half of the window."""
@@ -1242,6 +1887,36 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(sizes) >= 2:
             self._stored_tab_width = sizes[1]
 
+    def _show_release_info(self) -> None:
+        notes_path = resolve_resource_path("RELEASE_NOTES.md")
+        try:
+            content = notes_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "릴리스 정보",
+                f"릴리스 정보를 불러올 수 없습니다.\n\n{exc}",
+            )
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("릴리스 정보")
+        dialog.setModal(True)
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        text_edit = QtWidgets.QPlainTextEdit(dialog)
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText(content)
+        layout.addWidget(text_edit)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.resize(540, 420)
+        dialog.exec_()
+
     def _show_license_info(self) -> None:
         QtWidgets.QMessageBox.information(
             self,
@@ -1255,11 +1930,358 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_author_info(self) -> None:
         QtWidgets.QMessageBox.information(self, "제작자", "Made by Chris\n2025.10.28")
 
+
+    def _rotate_document_cw(self) -> None:
+        self._perform_document_rotation(90)
+
+    def _rotate_document_ccw(self) -> None:
+        self._perform_document_rotation(-90)
+
+    def _rotate_page_cw(self) -> None:
+        self._perform_page_rotation(90)
+
+    def _rotate_page_ccw(self) -> None:
+        self._perform_page_rotation(-90)
+
+    def _perform_document_rotation(self, degrees: int) -> None:
+        document = self._get_current_document()
+        if not document:
+            QtWidgets.QMessageBox.information(self, "문서 회전", "회전할 문서를 먼저 선택하세요.")
+            return
+        try:
+            document.rotate_document(degrees)
+        except Exception as exc:  # pragma: no cover - defensive UI path.
+            QtWidgets.QMessageBox.critical(self, "문서 회전 실패", str(exc))
+            return
+        if self.viewer.current_document() is document:
+            self.viewer.refresh_current_page()
+
+    def _perform_page_rotation(self, degrees: int) -> None:
+        document = self.viewer.current_document()
+        if document is None:
+            QtWidgets.QMessageBox.information(self, "페이지 회전", "현재 표시 중인 문서가 없습니다.")
+            return
+        page_index = self.viewer.current_page_index()
+        try:
+            document.rotate_page(page_index, degrees)
+        except Exception as exc:  # pragma: no cover - defensive UI path.
+            QtWidgets.QMessageBox.critical(self, "페이지 회전 실패", str(exc))
+            return
+        self.viewer.refresh_current_page()
+
+    def _save_changes(self) -> None:
+        document = self._get_current_document()
+        if not document:
+            QtWidgets.QMessageBox.information(self, "변경사항 저장", "저장할 문서를 먼저 선택하세요.")
+            return
+
+        path = normalize_path(document.path)
+        if not path.exists():
+            QtWidgets.QMessageBox.information(
+                self,
+                "변경사항 저장",
+                "원본 파일 경로를 찾을 수 없습니다.\n'변경사항 다른 이름으로 저장...'을 사용하세요.",
+            )
+            return
+
+        doc_obj = document.document
+        try:
+            if hasattr(doc_obj, "can_save_incrementally") and doc_obj.can_save_incrementally():
+                doc_obj.saveIncr()
+            else:
+                doc_obj.save(str(path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "변경사항 저장 실패", str(exc))
+            return
+
+        self._update_document_identity(path)
+        QtWidgets.QMessageBox.information(
+            self,
+            "변경사항 저장",
+            f"{path}\n\n변경사항을 저장했습니다.",
+        )
+
+    def _save_changes_as(self) -> None:
+        document = self._get_current_document()
+        if not document:
+            QtWidgets.QMessageBox.information(self, "변경사항 다른 이름으로 저장", "저장할 문서를 먼저 선택하세요.")
+            return
+        self._save_document_as(document)
+
+    def _show_print_preview(self) -> None:
+        document = self.viewer.current_document()
+        if document is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "인쇄 미리보기",
+                "현재 표시 중인 문서가 없습니다.",
+            )
+            return
+        if document.page_count <= 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "인쇄 미리보기",
+                "미리보기할 페이지가 없습니다.",
+            )
+            return
+
+        printer = QtPrintSupport.QPrinter(QtPrintSupport.QPrinter.HighResolution)
+        printer.setDocName(document.display_name)
+        preview_dialog = QtPrintSupport.QPrintPreviewDialog(printer, self)
+        preview_dialog.setWindowTitle("인쇄 미리보기")
+
+        current_page = self.viewer.current_page_index() + 1
+
+        def handle_preview(pr: QtPrintSupport.QPrinter) -> None:
+            first_page, last_page = self._determine_print_range(
+                pr,
+                document,
+                current_page,
+                force_all=True,
+            )
+            self._render_pages_to_printer(
+                document,
+                pr,
+                first_page,
+                last_page,
+                interactive=False,
+            )
+
+        preview_dialog.paintRequested.connect(handle_preview)
+
+        if hasattr(QtPrintSupport, "QPrintPreviewWidget"):
+            preview_widget = preview_dialog.findChild(QtPrintSupport.QPrintPreviewWidget)
+            if preview_widget:
+                preview_widget.setCurrentPage(current_page)
+
+        preview_dialog.exec_()
+
+    def _determine_print_range(
+        self,
+        printer: QtPrintSupport.QPrinter,
+        document: PdfDocument,
+        current_page: int,
+        *,
+        force_all: bool,
+    ) -> Tuple[int, int]:
+        if force_all:
+            return 1, document.page_count
+
+        range_mode = printer.printRange()
+        if range_mode == QtPrintSupport.QPrinter.PageRange:
+            first_page = printer.fromPage() or 0
+            last_page = printer.toPage() or 0
+            first = max(first_page, 1)
+            last = min(last_page if last_page else document.page_count, document.page_count)
+            if first <= last:
+                return first, last
+            QtWidgets.QMessageBox.warning(self, "인쇄", "유효한 페이지 범위를 선택하세요. 전체 페이지를 사용합니다.")
+            return 1, document.page_count
+
+        if range_mode in (QtPrintSupport.QPrinter.CurrentPage, QtPrintSupport.QPrinter.Selection):
+            return current_page, current_page
+
+        return 1, document.page_count
+
+    def _render_pages_to_printer(
+        self,
+        document: PdfDocument,
+        printer: QtPrintSupport.QPrinter,
+        first_page: int,
+        last_page: int,
+        *,
+        interactive: bool,
+    ) -> bool:
+        painter = QtGui.QPainter()
+        if not painter.begin(printer):
+            if interactive:
+                QtWidgets.QMessageBox.critical(self, "인쇄 실패", "프린터를 초기화할 수 없습니다.")
+            return False
+
+        try:
+            painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+            dpi = max(printer.resolution(), 150)
+            zoom = dpi / 72.0
+
+            for page_number in range(first_page, last_page + 1):
+                if page_number != first_page:
+                    if not printer.newPage():
+                        if interactive:
+                            QtWidgets.QMessageBox.critical(self, "인쇄 실패", "새 페이지를 생성할 수 없습니다.")
+                        return False
+
+                try:
+                    image = document.render_page(page_number - 1, zoom)
+                except Exception as exc:  # pragma: no cover - defensive UI path.
+                    if interactive:
+                        QtWidgets.QMessageBox.critical(self, "인쇄 실패", str(exc))
+                    return False
+
+                if image.isNull():
+                    continue
+
+                target_rect = printer.pageRect(QtPrintSupport.QPrinter.DevicePixel)
+                if isinstance(target_rect, QtCore.QRectF):
+                    target_rect = target_rect.toRect()
+                if target_rect.isEmpty():
+                    target_rect = printer.pageRect()
+
+                available_width = max(float(target_rect.width()), 1.0)
+                available_height = max(float(target_rect.height()), 1.0)
+                scale = min(available_width / max(image.width(), 1), available_height / max(image.height(), 1))
+
+                draw_width = image.width() * scale
+                draw_height = image.height() * scale
+                draw_x = float(target_rect.x()) + (available_width - draw_width) / 2.0
+                draw_y = float(target_rect.y()) + (available_height - draw_height) / 2.0
+
+                draw_rect = QtCore.QRectF(draw_x, draw_y, draw_width, draw_height)
+                painter.drawImage(draw_rect, image)
+            return True
+        finally:
+            painter.end()
+
+    def _get_current_document(self) -> Optional[PdfDocument]:
+        item = self.tab_list.currentItem()
+        if not item:
+            return None
+        document = item.data(UserRole)
+        return document if isinstance(document, PdfDocument) else None
+
+    def _prompt_document_choice(self) -> Optional[PdfDocument]:
+        if not self._documents:
+            return None
+
+        documents = list(self._documents.values())
+        if len(documents) == 1:
+            return documents[0]
+
+        current_doc = self._get_current_document()
+        options = [f"{doc.display_name} ({doc.path})" for doc in documents]
+        default_index = documents.index(current_doc) if current_doc in documents else 0
+        selection, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "문서 선택",
+            "이미지로 저장할 문서를 선택하세요:",
+            options,
+            default_index,
+            False,
+        )
+        if not ok:
+            return None
+        try:
+            selected_index = options.index(selection)
+        except ValueError:
+            return None
+        return documents[selected_index]
+
+    def _prompt_page_selection(self, document: PdfDocument) -> Optional[int]:
+        if document.page_count <= 0:
+            QtWidgets.QMessageBox.information(self, "페이지 선택", "선택 가능한 페이지가 없습니다.")
+            return None
+        default_page = 1
+        if self.viewer.current_document() is document:
+            default_page = self.viewer.current_page_index() + 1
+
+        page_number, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            "페이지 선택",
+            f"{document.display_name}에서 저장할 페이지 번호(1~{document.page_count})를 입력하세요:",
+            default_page,
+            1,
+            document.page_count,
+        )
+        if not ok:
+            return None
+        return page_number - 1
+
+    def _export_page_image(self) -> None:
+        if not self._documents:
+            QtWidgets.QMessageBox.information(self, "그림 저장", "열려 있는 문서가 없습니다.")
+            return
+
+        document = self._prompt_document_choice()
+        if document is None:
+            return
+
+        page_index = self._prompt_page_selection(document)
+        if page_index is None:
+            return
+
+        suggested_name = f"{document.display_name}_p{page_index + 1:03d}.png"
+        default_path = document.path.parent / suggested_name if document.path else Path.home() / suggested_name
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "그림 저장",
+            str(default_path),
+            "PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        target = Path(file_path).expanduser()
+        if not target.suffix:
+            target = target.with_suffix(".png")
+
+        suffix_map = {
+            ".png": "PNG",
+            ".jpg": "JPG",
+            ".jpeg": "JPG",
+            ".bmp": "BMP",
+        }
+        image_format = suffix_map.get(target.suffix.lower(), "PNG")
+        if target.suffix.lower() not in suffix_map:
+            target = target.with_suffix(".png")
+
+        try:
+            image = document.render_page(page_index, 2.0)
+        except Exception as exc:  # pragma: no cover - defensive UI path.
+            QtWidgets.QMessageBox.critical(self, "그림 저장 실패", str(exc))
+            return
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        if not image.save(_prepare_filesystem_path(target), image_format):
+            QtWidgets.QMessageBox.critical(
+                self,
+                "그림 저장 실패",
+                f"{_display_path_text(target)}\n\n이미지를 저장할 수 없습니다.",
+            )
+            return
+
+        QtWidgets.QMessageBox.information(
+            self,
+            "그림 저장",
+            f"{_display_path_text(target)}\n\n이미지를 저장했습니다.",
+        )
+
+
+
+    def _update_modify_actions_state(self, current_document: Optional[PdfDocument]) -> None:
+        has_any_document = bool(self._documents)
+        has_current = current_document is not None
+        has_viewer_doc = self.viewer.current_document() is not None
+
+        for action in (
+            self.rotate_document_cw_action,
+            self.rotate_document_ccw_action,
+            self.save_changes_action,
+            self.save_changes_as_action,
+        ):
+            action.setEnabled(has_current)
+        for action in (self.rotate_page_cw_action, self.rotate_page_ccw_action):
+            action.setEnabled(has_viewer_doc)
+        self.export_page_image_action.setEnabled(has_any_document)
+        self.print_preview_action.setEnabled(has_viewer_doc)
+
     def _save_document_as(self, document: PdfDocument) -> None:
         suggested_path = document.path if document.path.suffix else document.path.with_suffix(".pdf")
         new_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "다음 이름으로 저장",
+                "다른 이름으로 저장",
             str(suggested_path),
             "PDF documents (*.pdf);;All files (*)",
         )
@@ -1274,12 +2296,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         old_path = normalize_path(document.path)
         new_path_normalized = normalize_path(Path(new_path))
+        original_removed = False
+        removal_error: Optional[str] = None
+        display_path = _display_path_text(new_path_normalized)
+
         if new_path_normalized != old_path:
             self._handle_document_renamed(old_path, new_path_normalized)
+            if self._delete_original_on_save_as:
+                try:
+                    if old_path.exists():
+                        old_path.unlink()
+                        original_removed = True
+                except Exception as exc:
+                    removal_error = str(exc)
         else:
             self._update_document_identity(old_path)
 
-        QtWidgets.QMessageBox.information(self, "저장 완료", f"{new_path}\n\n저장이 완료되었습니다.")
+        message = f"{display_path}\n\n저장이 완료되었습니다."
+        if original_removed:
+            message += "\n\n원본 파일을 삭제했습니다."
+        QtWidgets.QMessageBox.information(self, "저장 완료", message)
+        if removal_error:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "삭제 실패",
+                f"새 파일은 저장되었지만 원본 파일을 삭제하지 못했습니다.\n\n{removal_error}",
+            )
 
     def _open_document_directory(self, document: PdfDocument) -> None:
         directory = document.path.parent
@@ -1296,16 +2338,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+    settings = QtCore.QSettings("PdfVertView", "PdfVerticalTabsViewer")
+    open_same_window = read_bool_setting(settings, "behavior/open_in_same_window", True)
+    cli_paths = [Path(argument).expanduser() for argument in sys.argv[1:] if argument]
+    existing_paths = [path for path in cli_paths if path.exists()]
+
+    if open_same_window and existing_paths and forward_paths_to_primary(existing_paths):
+        return 0
+
     window = MainWindow()
     window.show()
 
-    for argument in sys.argv[1:]:
-        path = Path(argument).expanduser()
-        if path.exists():
-            window.open_document_from_path(path)
+    for path in existing_paths:
+        window.open_document_from_path(path)
 
     return exec_qapplication(app)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

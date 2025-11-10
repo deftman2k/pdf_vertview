@@ -1,5 +1,5 @@
 #define MyAppName "PDF Vertical Tabs Viewer"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "Chris"
 #define MyAppExeName "pdf_vertview.exe"
 #define MyAppSourceDir "dist\pdf_vertview"
@@ -33,5 +33,13 @@ Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createall
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\.pdf"; ValueType: string; ValueName: ""; ValueData: "PDFVertView"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.pdf"; ValueType: string; ValueName: "Content Type"; ValueData: "application/pdf"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\PDFVertView"; ValueType: string; ValueName: ""; ValueData: "PDF VertView Document"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\PDFVertView\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icon.ico"
+Root: HKCU; Subkey: "Software\Classes\PDFVertView\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+
 [Run]
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-ClearIconCache"; Flags: runhidden
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
