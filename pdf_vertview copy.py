@@ -187,21 +187,6 @@ def resolve_resource_path(name: str) -> Path:
     return Path(__file__).resolve().parent / name
 
 
-_APP_ICON: Optional[QtGui.QIcon] = None
-
-
-def get_application_icon() -> QtGui.QIcon:
-    """Return the shared application icon, falling back to an empty icon."""
-    global _APP_ICON
-    if _APP_ICON is None:
-        try:
-            icon_path = resolve_resource_path("icon.ico")
-            _APP_ICON = QtGui.QIcon(str(icon_path))
-        except Exception:
-            _APP_ICON = QtGui.QIcon()
-    return _APP_ICON
-
-
 user_token = (os.environ.get('USERNAME') or os.environ.get('USER') or 'default')
 user_token = user_token.replace('\\', '_').replace('/', '_').replace(' ', '_')
 SINGLE_INSTANCE_SERVER = f'PdfVertViewSingleton_{user_token}'
@@ -1032,9 +1017,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        app_icon = get_application_icon()
-        if not app_icon.isNull():
-            self.setWindowIcon(app_icon)
         self._app_title = "PDF Vertical Tabs Viewer v1.0.7"
         self.setWindowTitle(self._app_title)
         self._settings = QtCore.QSettings("PdfVertView", "PdfVerticalTabsViewer")
@@ -2560,9 +2542,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
-    app_icon = get_application_icon()
-    if not app_icon.isNull():
-        app.setWindowIcon(app_icon)
     settings = QtCore.QSettings("PdfVertView", "PdfVerticalTabsViewer")
     open_same_window = read_bool_setting(settings, "behavior/open_in_same_window", True)
     cli_paths = [Path(argument).expanduser() for argument in sys.argv[1:] if argument]

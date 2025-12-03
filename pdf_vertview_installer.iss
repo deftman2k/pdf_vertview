@@ -1,5 +1,9 @@
+; -------------------------------------------------------------
+; Inno Setup script to package PyInstaller release output.
+; -------------------------------------------------------------
+
 #define MyAppName "PDF Vertical Tabs Viewer"
-#define MyAppVersion "1.0.5"
+#define MyAppVersion "1.0.7"
 #define MyAppPublisher "Chris"
 #define MyAppExeName "pdf_vertview.exe"
 #define MyAppSourceDir "dist\pdf_vertview"
@@ -39,6 +43,14 @@ Root: HKCU; Subkey: "Software\Classes\.pdf"; ValueType: string; ValueName: "Cont
 Root: HKCU; Subkey: "Software\Classes\PDFVertView"; ValueType: string; ValueName: ""; ValueData: "PDF VertView Document"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\PDFVertView\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icon.ico"
 Root: HKCU; Subkey: "Software\Classes\PDFVertView\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icon.ico"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "Vertical-tab PDF viewer"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}\Capabilities"; ValueType: string; ValueName: "ApplicationIcon"; ValueData: "{app}\icon.ico"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExeName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".pdf"; ValueData: "PDFVertView"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: "Software\\Classes\\Applications\\{#MyAppExeName}\\Capabilities"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{sys}\ie4uinit.exe"; Parameters: "-ClearIconCache"; Flags: runhidden
