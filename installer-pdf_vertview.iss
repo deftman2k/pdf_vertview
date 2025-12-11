@@ -3,7 +3,7 @@
 ; Build with: iscc installer-pdf_vertview.iss
 ; -------------------------------------------------------------
 
-#define AppVer "1.0.5"
+#define AppVer "1.0.8"
 
 [Setup]
 AppName=PDF VertView

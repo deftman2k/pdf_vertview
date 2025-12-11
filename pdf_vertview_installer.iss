@@ -1,5 +1,5 @@
 #define MyAppName "PDF Vertical Tabs Viewer"
-#define MyAppVersion "1.0.5"
+#define MyAppVersion "1.0.8"
 #define MyAppPublisher "Chris"
 #define MyAppExeName "pdf_vertview.exe"
 #define MyAppSourceDir "dist\pdf_vertview"

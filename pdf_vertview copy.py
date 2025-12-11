@@ -340,69 +340,6 @@ class PdfDocument:
     def page_rect(self, index: int) -> fitz.Rect:
         return self.document.load_page(index).rect
 
-    def get_page_text(self, index: int) -> str:
-        """Extract all text from a page."""
-        if index < 0 or index >= self.page_count:
-            return ""
-        page = self.document.load_page(index)
-        return page.get_text()
-
-    def search_text(self, query: str, page_index: int = -1) -> list:
-        """
-        Search for text in the document.
-        
-        Args:
-            query: Text to search for
-            page_index: Page to search in (-1 means all pages)
-            
-        Returns:
-            List of (page_index, rect_list) tuples with matches
-        """
-        if not query.strip():
-            return []
-        
-        results = []
-        start_page = page_index if page_index >= 0 else 0
-        end_page = page_index + 1 if page_index >= 0 else self.page_count
-        
-        for idx in range(start_page, end_page):
-            try:
-                page = self.document.load_page(idx)
-                # search_for returns a list of rectangles for each match
-                rects = page.search_for(query)
-                if rects:
-                    results.append((idx, rects))
-            except Exception:
-                pass
-        
-        return results
-
-    def get_text_blocks(self, index: int) -> list:
-        """Get text blocks with their positions on a page."""
-        if index < 0 or index >= self.page_count:
-            return []
-        page = self.document.load_page(index)
-        # Get text with layout info - returns list of blocks
-        try:
-            text_dict = page.get_text("dict")
-            blocks = text_dict.get("blocks", [])
-            return blocks
-        except Exception:
-            return []
-
-    def get_text_in_rect(self, page_index: int, rect: tuple) -> str:
-        """Extract text within a specified rectangle on a page."""
-        if page_index < 0 or page_index >= self.page_count:
-            return ""
-        try:
-            page = self.document.load_page(page_index)
-            # rect should be (x0, y0, x1, y1)
-            fitz_rect = fitz.Rect(rect)
-            text = page.get_text("text", clip=fitz_rect)
-            return text.strip()
-        except Exception:
-            return ""
-
     def close(self) -> None:
         self.document.close()
 
@@ -499,6 +436,7 @@ class FileIdentity:
 
 # ---- Viewer widgets -----------------------------------------------------------
 
+
 class PdfViewerWidget(QtWidgets.QWidget):
     """Central widget that shows the current PDF page and exposes viewer actions."""
 
@@ -516,17 +454,6 @@ class PdfViewerWidget(QtWidgets.QWidget):
         self._panning_active: bool = False
         self._last_pan_pos = QtCore.QPoint()
         self._page_indicator_text: str = ""
-        
-        # Text search and selection support
-        self._search_results: list = []
-        self._current_search_index: int = 0
-        self._search_query: str = ""
-        self._text_selection_enabled: bool = True
-        self._selection_start = QtCore.QPoint()
-        self._selection_end = QtCore.QPoint()
-        self._rubber_band: Optional[QtWidgets.QRubberBand] = None
-        self._selected_text_cache: str = ""
-        self._selection_boxes: list[QtCore.QRectF] = []  # highlight rectangles in image coords
 
         self._image_label = QtWidgets.QLabel(
             "Open a PDF or drag & drop to begin\n\n기본기능에서 PDF파일을 열기 하거나, 드래그&드롭으로 가져올 수 있습니다"
@@ -584,42 +511,6 @@ class PdfViewerWidget(QtWidgets.QWidget):
         self._page_indicator.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self._page_indicator.setMinimumWidth(0)
 
-        # Create search toolbar
-        self._search_toolbar = QtWidgets.QWidget()
-        search_layout = QtWidgets.QHBoxLayout(self._search_toolbar)
-        search_layout.setContentsMargins(8, 4, 8, 4)
-        search_layout.setSpacing(6)
-        
-        search_label = QtWidgets.QLabel("검색:")
-        search_layout.addWidget(search_label)
-        
-        self._search_input = QtWidgets.QLineEdit()
-        self._search_input.setPlaceholderText("검색어를 입력하세요...")
-        self._search_input.setMaximumWidth(300)
-        self._search_input.textChanged.connect(self._on_search_input_text_changed)
-        self._search_input.returnPressed.connect(self._on_search_return_pressed)
-        search_layout.addWidget(self._search_input)
-        
-        self._search_prev_btn = QtWidgets.QPushButton("◀ 이전")
-        self._search_prev_btn.setMaximumWidth(80)
-        self._search_prev_btn.clicked.connect(self._on_search_prev_clicked)
-        search_layout.addWidget(self._search_prev_btn)
-        
-        self._search_next_btn = QtWidgets.QPushButton("다음 ▶")
-        self._search_next_btn.setMaximumWidth(80)
-        self._search_next_btn.clicked.connect(self._on_search_next_clicked)
-        search_layout.addWidget(self._search_next_btn)
-        
-        self._search_status = QtWidgets.QLabel("")
-        self._search_status.setStyleSheet("color: #666; font-size: 11px;")
-        search_layout.addWidget(self._search_status, 1)
-        
-        self._search_toolbar.setStyleSheet(
-            "QWidget { background-color: #f9f9f9; border-top: 1px solid #ddd; }"
-        )
-
-        self._search_toolbar.hide()
-
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -631,7 +522,6 @@ class PdfViewerWidget(QtWidgets.QWidget):
         viewer_row.addWidget(self._page_scrollbar, 0)
 
         layout.addLayout(viewer_row, 1)
-        layout.addWidget(self._search_toolbar, 0)
         layout.addWidget(self._page_indicator, 0)
 
         self.prev_action = QAction("◀ 이전 PAGE", self)
@@ -655,24 +545,6 @@ class PdfViewerWidget(QtWidgets.QWidget):
 
         self.fit_page_action = QAction("Fit page", self)
         self.fit_page_action.triggered.connect(self.fit_to_page)
-
-        self.find_action = QAction("검색 (Ctrl+F)", self)
-        self.find_action.setShortcut(QtGui.QKeySequence.StandardKey.Find)
-        self.find_action.triggered.connect(self.open_search_dialog)
-
-        self.find_next_action = QAction("다음 검색 결과 (F3)", self)
-        self.find_next_action.setShortcut(QtCore.Qt.Key_F3)
-        self.find_next_action.triggered.connect(self.find_next)
-
-        self.find_prev_action = QAction("이전 검색 결과 (Shift+F3)", self)
-        self.find_prev_action.setShortcut(QtGui.QKeySequence("Shift+F3"))
-        self.find_prev_action.triggered.connect(self.find_prev)
-
-        self._search_prev_btn.setEnabled(False)
-        self._search_next_btn.setEnabled(False)
-
-        self._search_escape_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
-        self._search_escape_shortcut.activated.connect(self._hide_search_toolbar)
 
         self._update_action_states()
 
@@ -727,20 +599,6 @@ class PdfViewerWidget(QtWidgets.QWidget):
         self._page_indicator.setText("")
         self._page_indicator_text = ""
         self._pending_fit_update = False
-        # Clear search/selection state
-        self._search_results = []
-        self._current_search_index = 0
-        self._search_query = ""
-        self._selected_text_cache = ""
-        self._selection_boxes = []
-        self._search_input.blockSignals(True)
-        self._search_input.clear()
-        self._search_input.blockSignals(False)
-        self._search_status.setText("")
-        self._search_prev_btn.setEnabled(False)
-        self._search_next_btn.setEnabled(False)
-        if self._rubber_band:
-            self._rubber_band.hide()
         self._update_action_states()
         self._sync_page_scrollbar()
 
@@ -837,45 +695,6 @@ class PdfViewerWidget(QtWidgets.QWidget):
             return
 
         pixmap = QtGui.QPixmap.fromImage(image)
-
-        # Rebuild search highlights for current page if we have active search
-        current_page_search_boxes: list[QtCore.QRectF] = []
-        if self._search_results and self._search_query:
-            for page_index, rects in self._search_results:
-                if page_index == self._page_index:
-                    current_page_search_boxes.extend([
-                        QtCore.QRectF(r.x0 * self._zoom, r.y0 * self._zoom, (r.x1 - r.x0) * self._zoom, (r.y1 - r.y0) * self._zoom)
-                        for r in rects
-                    ])
-
-        # Draw search result overlays if present
-        if current_page_search_boxes:
-            pm_copy = QtGui.QPixmap(pixmap)
-            painter = QtGui.QPainter(pm_copy)
-            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-            brush = QtGui.QBrush(QtGui.QColor(255, 200, 0, 150))  # Yellow for search
-            pen = QtGui.QPen(QtCore.Qt.NoPen)
-            painter.setBrush(brush)
-            painter.setPen(pen)
-            for rect in current_page_search_boxes:
-                painter.drawRect(rect)
-            painter.end()
-            pixmap = pm_copy
-
-        # Draw selection overlays if present (on top of search)
-        if self._selection_boxes:
-            pm_copy = QtGui.QPixmap(pixmap)
-            painter = QtGui.QPainter(pm_copy)
-            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-            brush = QtGui.QBrush(QtGui.QColor(0, 120, 215, 80))  # Blue for selection
-            pen = QtGui.QPen(QtCore.Qt.NoPen)
-            painter.setBrush(brush)
-            painter.setPen(pen)
-            for rect in self._selection_boxes:
-                painter.drawRect(rect)
-            painter.end()
-            pixmap = pm_copy
-
         self._image_label.setPixmap(pixmap)
         self._image_label.setMinimumSize(pixmap.size())
         self._page_indicator_text = (
@@ -917,67 +736,21 @@ class PdfViewerWidget(QtWidgets.QWidget):
                     self._scroll_area.viewport().setCursor(QtCore.Qt.ClosedHandCursor)
                     mouse_event.accept()
                     return True
-                elif (
-                    mouse_event.button() == QtCore.Qt.LeftButton
-                    and self._text_selection_enabled
-                    and self._document
-                ):
-                    # Start text selection
-                    self._selection_start = mouse_event.pos()
-                    self._selection_end = mouse_event.pos()
-                    if self._rubber_band is None:
-                        self._rubber_band = QtWidgets.QRubberBand(QtWidgets.QRubberBand.Rectangle, self._scroll_area.viewport())
-                    self._rubber_band.setGeometry(QtCore.QRect(self._selection_start, QtCore.QSize()))
-                    self._rubber_band.show()
-                    mouse_event.accept()
-                    return True
-            elif event.type() == QtCore.QEvent.MouseMove:
+            elif event.type() == QtCore.QEvent.MouseMove and self._panning_active:
                 mouse_event = cast(QtGui.QMouseEvent, event)
-                if self._panning_active:
-                    delta = mouse_event.pos() - self._last_pan_pos
-                    self._last_pan_pos = mouse_event.pos()
-                    hbar = self._scroll_area.horizontalScrollBar()
-                    vbar = self._scroll_area.verticalScrollBar()
-                    hbar.setValue(hbar.value() - delta.x())
-                    vbar.setValue(vbar.value() - delta.y())
-                    mouse_event.accept()
-                    return True
-                elif (
-                    mouse_event.buttons() & QtCore.Qt.LeftButton
-                    and self._text_selection_enabled
-                    and self._document
-                ):
-                    # Update text selection
-                    self._selection_end = mouse_event.pos()
-                    if self._rubber_band:
-                        rect = QtCore.QRect(self._selection_start, self._selection_end).normalized()
-                        self._rubber_band.setGeometry(rect)
-                    mouse_event.accept()
-                    return True
+                delta = mouse_event.pos() - self._last_pan_pos
+                self._last_pan_pos = mouse_event.pos()
+                hbar = self._scroll_area.horizontalScrollBar()
+                vbar = self._scroll_area.verticalScrollBar()
+                hbar.setValue(hbar.value() - delta.x())
+                vbar.setValue(vbar.value() - delta.y())
+                mouse_event.accept()
+                return True
             elif event.type() == QtCore.QEvent.MouseButtonRelease:
                 mouse_event = cast(QtGui.QMouseEvent, event)
                 if mouse_event.button() == QtCore.Qt.MiddleButton and self._panning_active:
                     self._panning_active = False
                     self._scroll_area.viewport().unsetCursor()
-                    mouse_event.accept()
-                    return True
-                elif (
-                    mouse_event.button() == QtCore.Qt.LeftButton
-                    and self._text_selection_enabled
-                    and self._document
-                ):
-                    # End text selection and extract text from selected area
-                    self._selection_end = mouse_event.pos()
-                    if self._rubber_band:
-                        self._rubber_band.hide()
-                    selected_text, boxes = self._extract_selected_text()
-                    self._selection_boxes = boxes
-                    self._selected_text_cache = selected_text
-                    if selected_text.strip():
-                        # Copy selected text to clipboard
-                        clipboard = QtWidgets.QApplication.clipboard()
-                        clipboard.setText(selected_text)
-                    self._render_current_page()
                     mouse_event.accept()
                     return True
             elif event.type() == QtCore.QEvent.Leave and self._panning_active:
@@ -1076,287 +849,6 @@ class PdfViewerWidget(QtWidgets.QWidget):
     def refresh_current_page(self) -> None:
         if self._document:
             self._render_current_page()
-
-    # -- Text search and selection ------------------------------------------
-
-    def _on_search_input_text_changed(self, text: str) -> None:
-        """Handle search input text changes - only clear when text emptied."""
-        if not self._document:
-            return
-        
-        if not text.strip():
-            self._search_results = []
-            self._current_search_index = 0
-            self._search_query = ""
-            self._search_status.setText("")
-            self._search_prev_btn.setEnabled(False)
-            self._search_next_btn.setEnabled(False)
-            self._render_current_page()
-    
-    def _perform_search(self, text: str) -> None:
-        """Perform search for the given text."""
-        if not self._document or not text.strip():
-            return
-        
-        self._search_query = text.strip()
-        self._current_search_index = 0
-        self._search_results = self._document.search_text(self._search_query)
-        
-        if self._search_results:
-            self._search_prev_btn.setEnabled(True)
-            self._search_next_btn.setEnabled(True)
-            self._go_to_search_result(0)
-        else:
-            self._search_prev_btn.setEnabled(False)
-            self._search_next_btn.setEnabled(False)
-            self._update_search_status()
-            self._render_current_page()
-    
-    def _on_search_return_pressed(self) -> None:
-        """Handle Enter key in search box - trigger the search."""
-        text = self._search_input.text()
-        if text.strip():
-            self._perform_search(text)
-    
-    def _on_search_prev_clicked(self) -> None:
-        """Handle previous search result button."""
-        if not self._search_results:
-            return
-        self._current_search_index = (self._current_search_index - 1) % len(self._search_results)
-        self._go_to_search_result(self._current_search_index)
-        self._update_search_status()
-    
-    def _on_search_next_clicked(self) -> None:
-        """Handle next search result button."""
-        if not self._search_results:
-            return
-        self._current_search_index = (self._current_search_index + 1) % len(self._search_results)
-        self._go_to_search_result(self._current_search_index)
-        self._update_search_status()
-    
-    def _update_search_status(self) -> None:
-        """Update search status display."""
-        if self._search_results and self._search_query:
-            current_num = self._current_search_index + 1
-            total_num = len(self._search_results)
-            self._search_status.setText(f"결과: {current_num}/{total_num}")
-        elif self._search_query:
-            self._search_status.setText(f"'{self._search_query}'을 찾을 수 없음")
-        else:
-            self._search_status.setText("")
-
-    def _clear_search_state(self) -> None:
-        """Reset search state so highlights and buttons disappear."""
-        self._search_results = []
-        self._current_search_index = 0
-        self._search_query = ""
-        self._search_status.setText("")
-        self._search_prev_btn.setEnabled(False)
-        self._search_next_btn.setEnabled(False)
-        self._render_current_page()
-
-    def _show_search_toolbar(self) -> None:
-        """Reveal the existing search toolbar for user input."""
-        self._search_toolbar.setVisible(True)
-        self._search_input.setFocus()
-        self._search_input.selectAll()
-
-    def _hide_search_toolbar(self) -> None:
-        """Hide the search toolbar."""
-        if self._search_toolbar.isVisible():
-            self._search_toolbar.hide()
-            self._clear_search_state()
-
-    def open_search_dialog(self) -> None:
-        """Open a dialog to search for text in the PDF."""
-        if not self._document:
-            QtWidgets.QMessageBox.warning(self, "검색", "먼저 PDF를 열어주세요.")
-            return
-        
-        self._show_search_toolbar()
-
-    def find_next(self) -> None:
-        """Go to the next search result (F3 key handler)."""
-        if not self._search_results or not self._search_query:
-            QtWidgets.QMessageBox.warning(self, "검색", "먼저 검색을 수행해주세요. (Ctrl+F)")
-            return
-        
-        self._on_search_next_clicked()
-
-    def find_prev(self) -> None:
-        """Go to the previous search result (Shift+F3 key handler)."""
-        if not self._search_results or not self._search_query:
-            QtWidgets.QMessageBox.warning(self, "검색", "먼저 검색을 수행해주세요. (Ctrl+F)")
-            return
-        
-        self._on_search_prev_clicked()
-
-    def _go_to_search_result(self, result_index: int) -> None:
-        """Navigate to a search result and highlight it."""
-        if not self._search_results or result_index < 0 or result_index >= len(self._search_results):
-            return
-        
-        self._current_search_index = result_index
-        page_index, rects = self._search_results[result_index]
-        self.go_to_page(page_index)
-        
-        # Update search status in toolbar
-        self._update_search_status()
-        self._render_current_page()  # Highlights will be rebuilt per-page
-
-    def _extract_selected_text(self) -> tuple[str, list[QtCore.QRectF]]:
-        """Extract text and highlight boxes from the selected region."""
-        if not self._document or not self._image_label.pixmap():
-            return "", []
-        
-        # Map viewport coords to image coords, respecting alignment and scroll
-        start_pt = self._map_viewport_to_image(self._selection_start)
-        end_pt = self._map_viewport_to_image(self._selection_end)
-        
-        # Normalize the rectangle (ensure start is top-left, end is bottom-right)
-        rect_x0 = min(start_pt.x(), end_pt.x())
-        rect_y0 = min(start_pt.y(), end_pt.y())
-        rect_x1 = max(start_pt.x(), end_pt.x())
-        rect_y1 = max(start_pt.y(), end_pt.y())
-
-        # Ensure a minimum box so single-click / tiny drags still capture a char
-        min_px = 2.0
-        if rect_x1 - rect_x0 < min_px:
-            center_x = 0.5 * (rect_x0 + rect_x1)
-            rect_x0 = center_x - min_px * 0.5
-            rect_x1 = center_x + min_px * 0.5
-        if rect_y1 - rect_y0 < min_px:
-            center_y = 0.5 * (rect_y0 + rect_y1)
-            rect_y0 = center_y - min_px * 0.5
-            rect_y1 = center_y + min_px * 0.5
-        
-        # Convert pixel coordinates to PDF coordinates (considering zoom)
-        pdf_x0 = rect_x0 / self._zoom
-        pdf_y0 = rect_y0 / self._zoom
-        pdf_x1 = rect_x1 / self._zoom
-        pdf_y1 = rect_y1 / self._zoom
-
-        # Slightly expand selection to keep edge punctuation (e.g., braces)
-        pad = max(0.5, 1.0 / max(self._zoom, 0.001))
-        clip_rect = fitz.Rect(pdf_x0 - pad, pdf_y0 - pad, pdf_x1 + pad, pdf_y1 + pad)
-
-        selection_boxes: list[QtCore.QRectF] = []
-
-        # 1) Char-level extraction for fine-grained selection
-        try:
-            page = self._document.document.load_page(self._page_index)
-            raw = page.get_text("rawdict") or {}
-            chars = []
-            for block in raw.get("blocks", []):
-                if block.get("type", 0) != 0:
-                    continue
-                for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        for ch in span.get("chars", []):
-                            bbox = ch.get("bbox")
-                            if not bbox or len(bbox) != 4:
-                                continue
-                            if fitz.Rect(bbox).intersects(clip_rect):
-                                chars.append((bbox[0], bbox[1], bbox[2], bbox[3], ch.get("c", "")))
-            if chars:
-                # Sort top-to-bottom, left-to-right
-                chars.sort(key=lambda t: (round(t[1], 2), t[0]))
-                out = []
-                current_y = None
-                line_gap = 4.0
-                try:
-                    spans_heights = []
-                    for block in raw.get("blocks", []):
-                        if block.get("type", 0) != 0:
-                            continue
-                        for line in block.get("lines", []):
-                            for span in line.get("spans", []):
-                                h = span.get("size", 0)
-                                if h:
-                                    spans_heights.append(h)
-                    if spans_heights:
-                        spans_heights.sort()
-                        median_h = spans_heights[len(spans_heights)//2]
-                        line_gap = max(2.0, median_h * 0.9)
-                except Exception:
-                    pass
-
-                for x0, y0, x1, y1, c in chars:
-                    if current_y is None:
-                        current_y = y0
-                    elif abs(y0 - current_y) > line_gap:
-                        out.append("\n")
-                        current_y = y0
-                    out.append(c)
-                    rect = QtCore.QRectF(x0 * self._zoom, y0 * self._zoom, (x1 - x0) * self._zoom, (y1 - y0) * self._zoom)
-                    selection_boxes.append(rect)
-                text_joined = "".join(out).strip()
-                if text_joined:
-                    return text_joined, selection_boxes
-        except Exception:
-            pass
-
-        # 2) Try direct clip extraction (preserves punctuation and spacing)
-        try:
-            page = self._document.document.load_page(self._page_index)
-            clip_text = page.get_text("text", clip=clip_rect).strip()
-            if clip_text:
-                # Use the drawn rect as highlight when we don't have per-char boxes
-                selection_boxes = [QtCore.QRectF(rect_x0, rect_y0, rect_x1 - rect_x0, rect_y1 - rect_y0)]
-                return clip_text, selection_boxes
-        except Exception:
-            pass
-
-        # 3) Word-level extraction with rect expansion
-        try:
-            page = self._document.document.load_page(self._page_index)
-            words = page.get_text("words")  # (x0,y0,x1,y1, word, block, line, word_no)
-            picked = [w for w in words if fitz.Rect(w[0:4]).intersects(clip_rect)]
-            if picked:
-                picked.sort(key=lambda w: (round(w[1], 1), w[0]))
-                lines = []
-                current_y = None
-                current_line = []
-                for w in picked:
-                    y0 = w[1]
-                    text = w[4]
-                    if current_y is None or abs(y0 - current_y) > 3:
-                        if current_line:
-                            lines.append(" ".join(current_line))
-                        current_line = [text]
-                        current_y = y0
-                    else:
-                        current_line.append(text)
-                if current_line:
-                    lines.append(" ".join(current_line))
-                selection_boxes = [
-                    QtCore.QRectF(w[0] * self._zoom, w[1] * self._zoom, (w[2] - w[0]) * self._zoom, (w[3] - w[1]) * self._zoom)
-                    for w in picked
-                ]
-                return "\n".join(lines).strip(), selection_boxes
-        except Exception:
-            pass
-
-        # 4) Fallback: original clip helper
-        selected_text = self._document.get_text_in_rect(
-            self._page_index,
-            (pdf_x0, pdf_y0, pdf_x1, pdf_y1)
-        )
-        selection_boxes = [QtCore.QRectF(rect_x0, rect_y0, rect_x1 - rect_x0, rect_y1 - rect_y0)]
-
-        return selected_text, selection_boxes
-
-    def _map_viewport_to_image(self, pos: QtCore.QPoint) -> QtCore.QPoint:
-        """Map a viewport position to image coordinates, clamped to pixmap bounds."""
-        if not self._image_label.pixmap():
-            return QtCore.QPoint()
-        mapped = self._image_label.mapFrom(self._scroll_area.viewport(), pos)
-        pixmap = self._image_label.pixmap()
-        if pixmap:
-            x = max(0, min(mapped.x(), pixmap.width()))
-            y = max(0, min(mapped.y(), pixmap.height()))
-            return QtCore.QPoint(x, y)
-        return mapped
 
 
 # ---- Main window --------------------------------------------------------------
@@ -1525,7 +1017,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self._app_title = "PDF Vertical Tabs Viewer v1.0.8"
+        self._app_title = "PDF Vertical Tabs Viewer v1.0.7"
         self.setWindowTitle(self._app_title)
         self._settings = QtCore.QSettings("PdfVertView", "PdfVerticalTabsViewer")
         geometry = self._settings.value("window/geometry", QtCore.QByteArray(), type=QtCore.QByteArray)
@@ -1683,20 +1175,10 @@ class MainWindow(QtWidgets.QMainWindow):
         base_menu.addAction(self.viewer.prev_action)
         base_menu.addAction(self.viewer.next_action)
         base_menu.addSeparator()
-        base_menu.addAction(self.viewer.find_action)
-        base_menu.addAction(self.viewer.find_prev_action)
-        base_menu.addAction(self.viewer.find_next_action)
-        base_menu.addSeparator()
         base_menu.addAction(self.viewer.zoom_out_action)
         base_menu.addAction(self.viewer.zoom_in_action)
         base_menu.addAction(self.viewer.fit_width_action)
         base_menu.addAction(self.viewer.fit_page_action)
-
-        base_menu.addSeparator()
-        self.exit_action = QAction("프로그램 종료", self)
-        self.exit_action.setShortcut(QtGui.QKeySequence.StandardKey.Quit)
-        self.exit_action.triggered.connect(self.close)
-        base_menu.addAction(self.exit_action)
 
         modify_menu = menubar.addMenu("변경기능")
 
@@ -2534,10 +2016,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_viewer_context_menu(self, point: QtCore.QPoint) -> None:
         menu = QtWidgets.QMenu(self)
-        menu.addAction(self.viewer.find_action)
-        menu.addAction(self.viewer.find_prev_action)
-        menu.addAction(self.viewer.find_next_action)
-        menu.addSeparator()
         menu.addAction(self.save_changes_action)
         menu.addAction(self.save_changes_as_action)
         menu.addSeparator()
