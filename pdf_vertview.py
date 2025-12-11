@@ -63,6 +63,18 @@ TAB_SORT_MODES = {
 }
 DEFAULT_TAB_SORT_MODE = TAB_SORT_RECENT
 
+TAB_SORT_NONE = "none"
+TAB_SORT_NAME_ASC = "name_asc"
+TAB_SORT_NAME_DESC = "name_desc"
+TAB_SORT_RECENT = "recent"
+TAB_SORT_MODES = {
+    TAB_SORT_NONE,
+    TAB_SORT_NAME_ASC,
+    TAB_SORT_NAME_DESC,
+    TAB_SORT_RECENT,
+}
+DEFAULT_TAB_SORT_MODE = TAB_SORT_RECENT
+
 
 def exec_qapplication(app: QtWidgets.QApplication) -> int:
     """Compatibility wrapper for QApplication.exec()."""
@@ -187,6 +199,21 @@ def resolve_resource_path(name: str) -> Path:
     return Path(__file__).resolve().parent / name
 
 
+_APP_ICON: Optional[QtGui.QIcon] = None
+
+
+def get_application_icon() -> QtGui.QIcon:
+    """Return the shared application icon, falling back to an empty icon."""
+    global _APP_ICON
+    if _APP_ICON is None:
+        try:
+            icon_path = resolve_resource_path("icon.ico")
+            _APP_ICON = QtGui.QIcon(str(icon_path))
+        except Exception:
+            _APP_ICON = QtGui.QIcon()
+    return _APP_ICON
+
+
 user_token = (os.environ.get('USERNAME') or os.environ.get('USER') or 'default')
 user_token = user_token.replace('\\', '_').replace('/', '_').replace(' ', '_')
 SINGLE_INSTANCE_SERVER = f'PdfVertViewSingleton_{user_token}'
@@ -216,8 +243,14 @@ class SingleInstanceHost(QtCore.QObject):
             self._read_socket(connection)
             connection.disconnectFromServer()
             connection.close()
+            self._read_socket(connection)
+            connection.disconnectFromServer()
+            connection.close()
 
     def _read_socket(self, socket: QtNetwork.QLocalSocket) -> None:
+        if not socket.bytesAvailable():
+            if not socket.waitForReadyRead(200):
+                return
         if not socket.bytesAvailable():
             if not socket.waitForReadyRead(200):
                 return
@@ -233,6 +266,7 @@ class SingleInstanceHost(QtCore.QObject):
             paths = [str(item) for item in payload if isinstance(item, str)]
         if paths:
             self.open_requested.emit(paths)
+        socket.flush()
         socket.flush()
 
 
@@ -1374,6 +1408,10 @@ class TabListWidget(QtWidgets.QListWidget):
         self.setAcceptDrops(False)
         self.setDefaultDropAction(QtCore.Qt.IgnoreAction)
         self.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
+        self.setDragEnabled(False)
+        self.setAcceptDrops(False)
+        self.setDefaultDropAction(QtCore.Qt.IgnoreAction)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
 
     def set_base_min_width(self, width: int) -> None:
         self._base_min_width = max(1, width)
@@ -1388,6 +1426,25 @@ class TabListWidget(QtWidgets.QListWidget):
         hint = super().sizeHint()
         hint.setWidth(max(self._base_min_width, hint.width()))
         return hint
+
+    # Block all drag/drop behaviour to prevent the view from reordering items.
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:  # type: ignore[override]
+        event.ignore()
+
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:  # type: ignore[override]
+        event.ignore()
+
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:  # type: ignore[override]
+        event.ignore()
+
+    def startDrag(self, supportedActions: QtCore.Qt.DropActions) -> None:  # type: ignore[override]
+        return
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        if event.buttons() & QtCore.Qt.LeftButton:
+            event.ignore()
+            return
+        super().mouseMoveEvent(event)
 
     # Block all drag/drop behaviour to prevent the view from reordering items.
     def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:  # type: ignore[override]
@@ -1465,6 +1522,18 @@ class SettingsDialog(QtWidgets.QDialog):
         sort_layout.addWidget(self.tab_sort_combo, 1)
         layout.addLayout(sort_layout)
 
+        sort_layout = QtWidgets.QHBoxLayout()
+        sort_label = QtWidgets.QLabel("세로 탭 정렬:", self)
+        sort_layout.addWidget(sort_label)
+
+        self.tab_sort_combo = QtWidgets.QComboBox(self)
+        self.tab_sort_combo.addItem("정렬 안 함", TAB_SORT_NONE)
+        self.tab_sort_combo.addItem("파일명 오름차순", TAB_SORT_NAME_ASC)
+        self.tab_sort_combo.addItem("파일명 내림차순", TAB_SORT_NAME_DESC)
+        self.tab_sort_combo.addItem("최신순서", TAB_SORT_RECENT)
+        sort_layout.addWidget(self.tab_sort_combo, 1)
+        layout.addLayout(sort_layout)
+
         layout.addStretch(1)
 
         button_box = QtWidgets.QDialogButtonBox(
@@ -1499,6 +1568,12 @@ class SettingsDialog(QtWidgets.QDialog):
             index = 0
         self.tab_sort_combo.setCurrentIndex(index)
 
+    def set_tab_sort_mode(self, mode: str) -> None:
+        index = self.tab_sort_combo.findData(mode)
+        if index < 0:
+            index = 0
+        self.tab_sort_combo.setCurrentIndex(index)
+
     def compact_mode_enabled(self) -> bool:
         return self.compact_checkbox.isChecked()
 
@@ -1514,6 +1589,10 @@ class SettingsDialog(QtWidgets.QDialog):
     def default_fit_mode(self) -> str:
         data = self.default_fit_combo.currentData()
         return data if isinstance(data, str) else "page"
+
+    def tab_sort_mode(self) -> str:
+        data = self.tab_sort_combo.currentData()
+        return data if isinstance(data, str) else DEFAULT_TAB_SORT_MODE
 
     def tab_sort_mode(self) -> str:
         data = self.tab_sort_combo.currentData()
@@ -1563,6 +1642,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_save_directory = normalize_path(Path(saved_dir_value))
             except Exception:
                 self._last_save_directory = Path(saved_dir_value).expanduser()
+        self._tab_sort_mode = DEFAULT_TAB_SORT_MODE
+        self._tab_recency: Dict[str, int] = {}
+        self._recency_counter = 0
+        saved_dir_value = self._settings.value("paths/last_save_dir", "", type=str)
+        self._last_save_directory: Optional[Path] = None
+        if isinstance(saved_dir_value, str) and saved_dir_value:
+            try:
+                self._last_save_directory = normalize_path(Path(saved_dir_value))
+            except Exception:
+                self._last_save_directory = Path(saved_dir_value).expanduser()
 
         self.tab_list = TabListWidget(self._min_tab_width)
         self.tab_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
@@ -1579,6 +1668,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_list.setTextElideMode(QtCore.Qt.ElideNone)
         self.tab_list.setWordWrap(True)
         self.tab_list.setLayoutDirection(LayoutLeftToRight)
+        self.tab_list.setMovement(QtWidgets.QListView.Static)
         self.tab_list.setMovement(QtWidgets.QListView.Static)
 
         self.status_label = StatusLabel("")
@@ -1627,6 +1717,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_menus()
         self._load_preferences()
+        self._single_instance_host: Optional[SingleInstanceHost] = None
+        try:
+            host = SingleInstanceHost(self)
+        except Exception:
+            host = None
+        if host is not None:
+            host.open_requested.connect(self._handle_external_open_request)
+            self._single_instance_host = host
         self._single_instance_host: Optional[SingleInstanceHost] = None
         try:
             host = SingleInstanceHost(self)
@@ -1774,6 +1872,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_default_fit_mode(mode_pref, persist=False)
         sort_pref = self._read_string_setting("ui/tab_sort_mode", DEFAULT_TAB_SORT_MODE)
         self._apply_tab_sort_mode(sort_pref, persist=False)
+        sort_pref = self._read_string_setting("ui/tab_sort_mode", DEFAULT_TAB_SORT_MODE)
+        self._apply_tab_sort_mode(sort_pref, persist=False)
 
     def _show_settings_dialog(self) -> None:
         dialog = SettingsDialog(self)
@@ -1782,6 +1882,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.set_open_same_window(self._open_additional_in_same_window)
         dialog.set_delete_original_on_save_as(self._delete_original_on_save_as)
         dialog.set_default_fit_mode(self._default_fit_mode)
+        dialog.set_tab_sort_mode(self._tab_sort_mode)
         dialog.set_tab_sort_mode(self._tab_sort_mode)
 
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
@@ -1792,6 +1893,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_open_in_same_window(dialog.open_same_window())
         self.set_delete_original_on_save_as(dialog.delete_original_on_save_as())
         self.set_default_fit_mode(dialog.default_fit_mode())
+        self._apply_tab_sort_mode(dialog.tab_sort_mode(), persist=True)
         self._apply_tab_sort_mode(dialog.tab_sort_mode(), persist=True)
 
     # -- document management -------------------------------------------------
@@ -2021,9 +2123,20 @@ class MainWindow(QtWidgets.QMainWindow):
             if parent_dir.exists():
                 self._last_save_directory = parent_dir
 
+        if (
+            self._last_save_directory is None
+            or self._last_save_directory == Path.cwd()
+            or (self._last_save_directory and not self._last_save_directory.exists())
+        ):
+            parent_dir = normalized.parent
+            if parent_dir.exists():
+                self._last_save_directory = parent_dir
+
         if make_current:
             self._select_tab(normalized)
 
+        self._mark_document_recent(normalized)
+        self._sort_tabs()
         self._mark_document_recent(normalized)
         self._sort_tabs()
         self.close_action.setEnabled(True)
@@ -2078,6 +2191,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_document_recent(document.path)
             if self._tab_sort_mode == TAB_SORT_RECENT:
                 self._sort_tabs()
+            self._mark_document_recent(document.path)
+            if self._tab_sort_mode == TAB_SORT_RECENT:
+                self._sort_tabs()
         self.setWindowTitle(self._app_title)
         self._update_status_label()
 
@@ -2115,6 +2231,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tab_panel.setMinimumWidth(self._min_tab_width)
             self.tab_panel.setMaximumWidth(QtWidgets.QWIDGETSIZE_MAX)
             self._apply_tab_width(self._expanded_width)
+        self.tab_list.setMovement(QtWidgets.QListView.Static)
         self.tab_list.setMovement(QtWidgets.QListView.Static)
 
         self._settings.setValue("ui/compact_tabs", enabled)
@@ -2192,6 +2309,97 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewer.set_default_fit_mode(normalized)
         if persist:
             self._settings.setValue("ui/default_fit_mode", normalized)
+
+    def _apply_tab_sort_mode(self, mode: str, *, persist: bool) -> None:
+        normalized = mode if mode in TAB_SORT_MODES else DEFAULT_TAB_SORT_MODE
+        previous = self._tab_sort_mode
+        if normalized == previous and not persist:
+            return
+        self._tab_sort_mode = normalized
+        if persist:
+            self._settings.setValue("ui/tab_sort_mode", normalized)
+        if normalized != previous:
+            self._sort_tabs()
+
+    def _sort_tabs(self) -> None:
+        count = self.tab_list.count()
+        if count <= 1:
+            return
+
+        items = [self.tab_list.item(index) for index in range(count)]
+        if any(item is None for item in items):
+            return
+
+        if self._tab_sort_mode == TAB_SORT_RECENT:
+            ordered = sorted(
+                items,
+                key=lambda item: self._tab_recency.get(self._item_path_key(item), 0),
+                reverse=True,
+            )
+            if ordered == items:
+                return
+            self._reorder_tab_items(ordered)
+            return
+
+        if self._tab_sort_mode not in (TAB_SORT_NAME_ASC, TAB_SORT_NAME_DESC):
+            return
+
+        reverse = self._tab_sort_mode == TAB_SORT_NAME_DESC
+
+        def name_key(item: QtWidgets.QListWidgetItem) -> tuple[str, str]:
+            display = (item.data(TITLE_ROLE) or "").casefold()
+            fallback = self._item_path_key(item)
+            return (display, fallback.casefold())
+
+        ordered = sorted(items, key=name_key, reverse=reverse)
+        if ordered == items:
+            return
+
+        self._reorder_tab_items(ordered)
+
+    def _reorder_tab_items(self, ordered: list[QtWidgets.QListWidgetItem]) -> None:
+        current_item = self.tab_list.currentItem()
+        self.tab_list.blockSignals(True)
+        for target_index, item in enumerate(ordered):
+            current_index = self.tab_list.row(item)
+            if current_index == target_index or current_index < 0:
+                continue
+            taken = self.tab_list.takeItem(current_index)
+            self.tab_list.insertItem(target_index, taken)
+        self.tab_list.blockSignals(False)
+        if current_item:
+            self.tab_list.blockSignals(True)
+            self.tab_list.setCurrentItem(current_item)
+            self.tab_list.blockSignals(False)
+        self._refresh_tab_labels()
+        self._update_status_label()
+
+    def _move_tab_to_index(self, path: Path, target_index: int) -> None:
+        item = self._tab_items.get(path)
+        if not item:
+            return
+        items = [self.tab_list.item(index) for index in range(self.tab_list.count())]
+        if item not in items:
+            return
+        items.remove(item)
+        target_index = max(0, min(target_index, len(items)))
+        items.insert(target_index, item)
+        self._reorder_tab_items(items)
+
+    def _item_path_key(self, item: QtWidgets.QListWidgetItem) -> str:
+        path_str = item.data(PATH_ROLE)
+        return str(path_str) if path_str else ""
+
+    def _mark_document_recent(self, path: Path) -> None:
+        try:
+            normalized_path = normalize_path(path)
+        except Exception:
+            normalized_path = path
+        key = str(normalized_path)
+        self._recency_counter += 1
+        self._tab_recency[key] = self._recency_counter
+        if self._tab_sort_mode == TAB_SORT_RECENT:
+            self._move_tab_to_index(normalized_path, 0)
 
     def _apply_tab_sort_mode(self, mode: str, *, persist: bool) -> None:
         normalized = mode if mode in TAB_SORT_MODES else DEFAULT_TAB_SORT_MODE
@@ -2494,6 +2702,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tab_items.pop(normalized, None)
         self._doc_identities.pop(normalized, None)
         self._tab_recency.pop(str(normalized), None)
+        self._tab_recency.pop(str(normalized), None)
         self._remove_watch(normalized)
 
     def _show_tab_context_menu(self, point: QtCore.QPoint) -> None:
@@ -2508,6 +2717,7 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = QtWidgets.QMenu(self)
         copy_name_action = menu.addAction("파일명 복사")
         copy_dir_action = menu.addAction("전체경로 복사")
+        copy_dir_action = menu.addAction("전체경로 복사")
         save_as_action = menu.addAction("다른 이름으로 저장…")
         folder_action = menu.addAction("파일 위치 열기")
         menu.addSeparator()
@@ -2520,6 +2730,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if selected == copy_name_action:
             self.tab_list.setCurrentItem(item)
             QtWidgets.QApplication.clipboard().setText(document.path.name)
+        elif selected == copy_dir_action:
+            self.tab_list.setCurrentItem(item)
+            QtWidgets.QApplication.clipboard().setText(_display_path_text(document.path.parent))
         elif selected == copy_dir_action:
             self.tab_list.setCurrentItem(item)
             QtWidgets.QApplication.clipboard().setText(_display_path_text(document.path.parent))
@@ -2994,8 +3207,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_save_directory = normalized
         self._settings.setValue("paths/last_save_dir", str(normalized))
 
+    def _remember_last_save_directory(self, directory: Path) -> None:
+        normalized = normalize_path(directory)
+        self._last_save_directory = normalized
+        self._settings.setValue("paths/last_save_dir", str(normalized))
+
     def _save_document_as(self, document: PdfDocument) -> None:
         suggested_path = document.path if document.path.suffix else document.path.with_suffix(".pdf")
+        suggested_path = normalize_path(suggested_path)
+
+        if (
+            self._last_save_directory
+            and not suggested_path.parent.exists()
+        ):
+            suggested_path = normalize_path(self._last_save_directory / suggested_path.name)
         suggested_path = normalize_path(suggested_path)
 
         if (
@@ -3006,6 +3231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         new_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "다른 이름으로 저장",
+            "다른 이름으로 저장",
             str(suggested_path),
             "PDF documents (*.pdf);;All files (*)",
         )
@@ -3013,13 +3239,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         target_path = Path(new_path)
+        target_path = Path(new_path)
         try:
+            document.save_as(target_path)
             document.save_as(target_path)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "저장 실패", str(exc))
             return
 
         old_path = normalize_path(document.path)
+        new_path_normalized = normalize_path(target_path)
+        self._remember_last_save_directory(new_path_normalized.parent)
         new_path_normalized = normalize_path(target_path)
         self._remember_last_save_directory(new_path_normalized.parent)
         original_removed = False
@@ -3064,6 +3294,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+    app_icon = get_application_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     settings = QtCore.QSettings("PdfVertView", "PdfVerticalTabsViewer")
     open_same_window = read_bool_setting(settings, "behavior/open_in_same_window", True)
     cli_paths = [Path(argument).expanduser() for argument in sys.argv[1:] if argument]

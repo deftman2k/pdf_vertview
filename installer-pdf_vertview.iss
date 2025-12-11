@@ -50,6 +50,14 @@ Root: HKCU; Subkey: "Software\Classes\.pdf"; ValueType: string; ValueName: "Cont
 Root: HKCU; Subkey: "Software\Classes\PDFVertView"; ValueType: string; ValueName: ""; ValueData: "PDF VertView Document"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\PDFVertView\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icon.ico"
 Root: HKCU; Subkey: "Software\Classes\PDFVertView\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\pdf_vertview.exe"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\Applications\pdf_vertview.exe"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "PDF VertView"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\pdf_vertview.exe\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icon.ico"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\pdf_vertview.exe\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\pdf_vertview.exe"" ""%1"""; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\pdf_vertview.exe\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "PDF VertView"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\pdf_vertview.exe\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "Vertical-tab PDF viewer"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\pdf_vertview.exe\Capabilities"; ValueType: string; ValueName: "ApplicationIcon"; ValueData: "{app}\icon.ico"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\pdf_vertview.exe\Capabilities\FileAssociations"; ValueType: string; ValueName: ".pdf"; ValueData: "PDFVertView"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "PDF VertView"; ValueData: "Software\\Classes\\Applications\\pdf_vertview.exe\\Capabilities"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{sys}\ie4uinit.exe"; Parameters: "-ClearIconCache"; Flags: runhidden
